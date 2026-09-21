@@ -63,3 +63,13 @@ def list_runs() -> list[dict]:
 def get_latest_run() -> Optional[dict]:
     rows = list_runs()
     return rows[0] if rows else None
+
+
+def clear_runs() -> int:
+    """Delete all stored benchmark runs. Returns how many were removed."""
+    conn = get_connection()
+    cursor = conn.execute("DELETE FROM benchmark_runs")
+    conn.commit()
+    removed = cursor.rowcount
+    conn.close()
+    return removed

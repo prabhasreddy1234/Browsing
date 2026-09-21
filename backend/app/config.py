@@ -22,6 +22,11 @@ JEV_IN_PER_M = float(os.getenv("JEV_IN_PER_M", "0.042"))
 # Hard cap on real LLM spend for a demo session (Jev is ~free and never blocked).
 DEMO_BUDGET_USD = float(os.getenv("DEMO_BUDGET_USD", "0.5"))
 
+# Open the browser visibly (a window pops up) on the single-pipeline tabs. Set
+# BROWSER_HEADED=0 in .env to run headless if a visible window misbehaves (e.g.
+# running the backend without a desktop session). The Compare tab is always headless.
+BROWSER_HEADED = os.getenv("BROWSER_HEADED", "1").strip().lower() not in ("0", "false", "no", "off")
+
 
 def has_jev_key() -> bool:
     """True when a real TypeSafe key is set; otherwise Jev runs in simulation."""

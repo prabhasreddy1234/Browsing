@@ -55,6 +55,13 @@ const API_BASE = 'http://localhost:8000';
 
 const currency = (value: number) => `$${Number(value || 0).toFixed(8)}`;
 
+// Human-readable dollars for larger (monthly) totals.
+const usd = (value: number) =>
+  `$${Number(value || 0).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: Math.abs(Number(value)) < 1 ? 6 : 2,
+  })}`;
+
 const EMPTY_SUMMARY: DashboardSummary = {
   total_tests: 0,
   jev_accuracy: 0,
@@ -241,12 +248,15 @@ function WorkflowSteps({ steps, nowTick }: { steps: LiveStep[]; nowTick: number 
 function App() {
   const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
   const [appStatus, setAppStatus] = useState<AppStatus | null>(null);
+  const [pricing, setPricing] = useState<any>(null);
+  const [sim, setSim] = useState({ requestsPerMonth: 3000000, avgInput: 1200, avgOutput: 220, pctLlm: 30 });
 
   // LLM-only tab state
   const [llmQuery, setLlmQuery] = useState('What is the capital of Australia?');
-  const [llmResult, setLlmResult] = useState<LlmOnlyResult | null>(null);
+  const [llmResult, setLlmResult] = useState<BrowserResult | null>(null);
   const [llmLoading, setLlmLoading] = useState(false);
   const [llmError, setLlmError] = useState('');
+  const [llmOnlySteps, setLlmOnlySteps] = useState<LiveStep[]>([]);
 
   // Jev + LLM browser tab state
   const [browserQuery, setBrowserQuery] = useState('Find information about Android 16');
@@ -341,8 +351,19 @@ function App() {
     }
   };
 
+  const fetchPricing = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/benchmark/cost-analysis`);
+      const data = await response.json();
+      setPricing(data.pricing || null);
+    } catch (error) {
+      setPricing(null);
+    }
+  };
+
   const refreshData = async () => {
     await fetchStatus();
+    await fetchPricing();
     await fetchSummary();
     await fetchResults();
     await fetchQueries();
@@ -354,10 +375,10 @@ function App() {
 
   // Ticks while an agent runs, so the active step shows a live elapsed timer.
   useEffect(() => {
-    if (!browserLoading && !compareLoading) return;
+    if (!browserLoading && !compareLoading && !llmLoading) return;
     const id = setInterval(() => setNowTick(Date.now()), 100);
     return () => clearInterval(id);
-  }, [browserLoading, compareLoading]);
+  }, [browserLoading, compareLoading, llmLoading]);
 
   const latencyChartData = useMemo(() => {
     const jev = results.filter((row) => row.jev_latency_ms != null).map((row) => row.jev_latency_ms as number);
@@ -383,11 +404,17 @@ function App() {
   }, [results]);
 
   const accuracyData = useMemo(() => {
-    const total = results.length || 1;
-    const jevCount = results.filter((r) => r.jev_correct).length;
-    const openaiCount = results.filter((r) => r.openai_correct).length;
+    // Only count graded results (jev_correct / openai_correct is a real boolean).
+    const jevGraded = results.filter((r) => r.jev_correct === true || r.jev_correct === false);
+    const openaiGraded = results.filter((r) => r.openai_correct === true || r.openai_correct === false);
+    const jevCount = jevGraded.filter((r) => r.jev_correct).length;
+    const openaiCount = openaiGraded.filter((r) => r.openai_correct).length;
     return [
-      { name: 'Accuracy', jev: (jevCount / total) * 100, openai: (openaiCount / total) * 100 },
+      {
+        name: 'Accuracy',
+        jev: jevGraded.length ? (jevCount / jevGraded.length) * 100 : 0,
+        openai: openaiGraded.length ? (openaiCount / openaiGraded.length) * 100 : 0,
+      },
     ];
   }, [results]);
 
@@ -460,25 +487,44 @@ function App() {
   };
 
   const clearHistory = async () => {
+    try {
+      await fetch(`${API_BASE}/api/benchmark/results`, { method: 'DELETE' });
+    } catch (error) {
+      /* ignore */
+    }
     setResults([]);
     setRuns([]);
-    setSummary(null);
+    setSummary(EMPTY_SUMMARY);
+    setJsonPayload('');
+    await refreshData();
   };
+
+  // Live cost model for the simulator, using the real pricing table + Jev price.
+  const simResult = useMemo(() => {
+    const llmModel = appStatus?.llm_model || 'gpt-4o-mini';
+    const p = (pricing?.openai?.[llmModel]) || { input: 0.15, output: 0.6 };
+    const jevIn = appStatus?.jev_in_per_m ?? 0.042;
+    const perLlmCall = (sim.avgInput * p.input + sim.avgOutput * p.output) / 1_000_000;
+    const jevDecision = (sim.avgInput * jevIn) / 1_000_000; // Jev bills input only
+    const llmOnly = sim.requestsPerMonth * perLlmCall;
+    const jevRouted = sim.requestsPerMonth * jevDecision + sim.requestsPerMonth * (sim.pctLlm / 100) * perLlmCall;
+    const diff = llmOnly - jevRouted;
+    const pct = llmOnly ? (diff / llmOnly) * 100 : 0;
+    return { llmModel, perLlmCall, jevDecision, llmOnly, jevRouted, diff, pct };
+  }, [sim, pricing, appStatus]);
 
   const runLlmOnly = async () => {
     if (!llmQuery.trim()) return;
     setLlmLoading(true);
     setLlmError('');
     setLlmResult(null);
+    setLlmOnlySteps([]);
     try {
-      const response = await fetch(`${API_BASE}/api/agent/llm-only`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: llmQuery.trim(), temperature: 0 }),
+      await streamSSE('/api/agent/llm/stream', { query: llmQuery.trim(), temperature: 0.2 }, (ev) => {
+        applyStepEvent(setLlmOnlySteps, ev);
+        if (ev.type === 'done') setLlmResult(ev.result as BrowserResult);
+        else if (ev.type === 'error') setLlmError(String(ev.error));
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Request failed');
-      setLlmResult(data as LlmOnlyResult);
     } catch (error) {
       setLlmError(String(error instanceof Error ? error.message : error));
     } finally {
@@ -638,7 +684,7 @@ function App() {
           <div>
             <h2>
               {activeTab === 'dashboard' && 'Benchmark Dashboard'}
-              {activeTab === 'llm' && 'LLM Only — tool decision'}
+              {activeTab === 'llm' && 'LLM Only — live browser agent'}
               {activeTab === 'browser' && 'Jev + LLM — live browser agent'}
               {activeTab === 'compare' && 'Benchmark — Jev + LLM vs LLM only'}
             </h2>
@@ -865,19 +911,57 @@ OpenAI LLM only when required</pre>
 
         <section className="panel">
           <h3>Cost optimization simulator</h3>
+          <p className="muted">
+            Live estimate using the real pricing table ({simResult.llmModel}: LLM, Jev at $
+            {appStatus?.jev_in_per_m ?? 0.042}/1M input, output free). Jev routes every request cheaply and
+            only a percentage need the full LLM call.
+          </p>
           <div className="simulator-grid">
             <div>
-              <label>Requests per day<input defaultValue={100000} /></label>
-              <label>Requests per month<input defaultValue={3000000} /></label>
-              <label>Average input tokens<input defaultValue={1200} /></label>
-              <label>Average output tokens<input defaultValue={220} /></label>
+              <label>
+                Requests per month
+                <input
+                  type="number"
+                  value={sim.requestsPerMonth}
+                  onChange={(e) => setSim({ ...sim, requestsPerMonth: Number(e.target.value) })}
+                />
+              </label>
+              <label>
+                Average input tokens / call
+                <input
+                  type="number"
+                  value={sim.avgInput}
+                  onChange={(e) => setSim({ ...sim, avgInput: Number(e.target.value) })}
+                />
+              </label>
+              <label>
+                Average output tokens / call
+                <input
+                  type="number"
+                  value={sim.avgOutput}
+                  onChange={(e) => setSim({ ...sim, avgOutput: Number(e.target.value) })}
+                />
+              </label>
+              <label>
+                % of requests needing the main LLM
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={sim.pctLlm}
+                  onChange={(e) => setSim({ ...sim, pctLlm: Number(e.target.value) })}
+                />
+              </label>
             </div>
             <div className="simulator-results">
-              <p>Jev monthly estimated cost: $0.00000000</p>
-              <p>OpenAI monthly estimated cost: $0.00000000</p>
-              <p>Estimated difference: $0.00000000</p>
-              <p>Estimated percentage difference: 0.00%</p>
-              <p>Scenario: 100,000 requests with only 30% requiring main LLM.</p>
+              <p>LLM-only monthly cost: <strong>{usd(simResult.llmOnly)}</strong></p>
+              <p>Jev-routed monthly cost: <strong>{usd(simResult.jevRouted)}</strong></p>
+              <p>Estimated saving: <strong>{usd(simResult.diff)}</strong></p>
+              <p>Estimated saving: <strong>{simResult.pct.toFixed(1)}%</strong></p>
+              <p className="muted">
+                Per LLM call: {currency(simResult.perLlmCall)} · Per Jev decision: {currency(simResult.jevDecision)} ·
+                Scenario: {sim.pctLlm}% of requests reach the main LLM.
+              </p>
             </div>
           </div>
         </section>
@@ -892,23 +976,47 @@ OpenAI LLM only when required</pre>
         {activeTab === 'llm' && (
           <section className="agent-view">
             <div className="panel">
-              <h3>LLM only</h3>
+              <h3>
+                LLM only{' '}
+                {appStatus && (
+                  <span className={`badge ${appStatus.llm === 'live' ? 'badge-live' : 'badge-sim'}`}>LLM: {appStatus.llm}</span>
+                )}
+              </h3>
               <p className="muted">
-                The query goes straight to the LLM, which selects one tool. No Jev routing and no
-                browser — this is the traditional baseline. Time and cost are logged below.
+                The <strong>LLM decides</strong> the tool, then your code opens a <strong>real browser
+                (a window pops up on screen)</strong> to search the web for your input, and the LLM
+                <strong> writes an answer</strong> grounded in the page. Time, tokens and cost are logged per step.
               </p>
               <textarea
                 value={llmQuery}
                 onChange={(e) => setLlmQuery(e.target.value)}
-                placeholder="Ask something, e.g. What is the capital of Australia?"
+                placeholder="Ask something, e.g. What is the latest news about Android 16?"
               />
               <div className="button-row">
                 <button onClick={runLlmOnly} disabled={llmLoading}>
-                  {llmLoading ? 'Running...' : 'Run LLM'}
+                  {llmLoading ? 'Opening browser…' : 'Run LLM'}
                 </button>
               </div>
               {llmError && <p className="error-text">{llmError}</p>}
             </div>
+
+            {llmOnlySteps.length > 0 && (
+              <div className="panel">
+                <h3>
+                  Live workflow{' '}
+                  <span className="muted">
+                    {llmOnlySteps.filter((s) => s.status === 'done').length}/{llmOnlySteps[0]?.total ?? 3} steps
+                  </span>
+                </h3>
+                <div className="wf-progress">
+                  <div
+                    className="wf-progress-fill"
+                    style={{ width: `${(llmOnlySteps.filter((s) => s.status === 'done').length / (llmOnlySteps[0]?.total ?? 3)) * 100}%` }}
+                  />
+                </div>
+                <WorkflowSteps steps={llmOnlySteps} nowTick={nowTick} />
+              </div>
+            )}
 
             {llmResult && (
               <>
@@ -918,16 +1026,16 @@ OpenAI LLM only when required</pre>
                     <strong>{llmResult.selected_tool}</strong>
                   </div>
                   <div className="card">
-                    <span>Confidence</span>
-                    <strong>{`${(Number(llmResult.decision.confidence) * 100).toFixed(0)}%`}</strong>
-                  </div>
-                  <div className="card">
-                    <span>Time</span>
+                    <span>Total time</span>
                     <strong>{`${Number(llmResult.total_time_ms).toFixed(0)} ms`}</strong>
                   </div>
                   <div className="card">
-                    <span>Cost</span>
+                    <span>Total cost</span>
                     <strong>{currency(llmResult.total_cost)}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Browser time</span>
+                    <strong>{`${Number(llmResult.browser.browser_time_ms).toFixed(0)} ms`}</strong>
                   </div>
                   <div className="card">
                     <span>Input tokens</span>
@@ -939,9 +1047,21 @@ OpenAI LLM only when required</pre>
                   </div>
                 </section>
                 <div className="panel">
-                  <h3>Reasoning</h3>
-                  <p>{llmResult.decision.reason}</p>
-                  <p className="muted">Model: {llmResult.model || '—'}</p>
+                  <h3>LLM answer (grounded in the page)</h3>
+                  <p>{llmResult.answer}</p>
+                </div>
+                <div className="panel">
+                  <h3>Browser result</h3>
+                  <p className="muted">
+                    Engine: {llmResult.browser.engine}
+                    {llmResult.browser.fallback &&
+                      ' (visible browser unavailable — fell back to HTTP fetch. Run the backend on your desktop with Chromium installed.)'}
+                  </p>
+                  <p>
+                    <strong>{llmResult.browser.title || '(no title)'}</strong>
+                  </p>
+                  <p className="muted">{llmResult.browser.final_url}</p>
+                  <pre>{llmResult.browser.snippet || '(no text captured)'}</pre>
                 </div>
               </>
             )}
@@ -967,9 +1087,9 @@ OpenAI LLM only when required</pre>
               <p className="muted">
                 <strong>Jev makes the decision</strong> (a typed System One choice — input-billed only
                 at ${appStatus ? appStatus.jev_in_per_m : 0.042}/1M, output free). <strong>Your code owns
-                the control flow</strong> and opens a real headless Chromium browser. <strong>The LLM
-                writes the words</strong> — a short answer grounded in the page. Time and cost are logged
-                per step below.
+                the control flow</strong> and opens a <strong>real browser (a window pops up on screen)</strong>.
+                <strong> The LLM writes the words</strong> — a short answer grounded in the page. Time and cost
+                are logged per step below.
               </p>
               <textarea
                 value={browserQuery}

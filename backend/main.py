@@ -12,8 +12,8 @@ from pydantic import BaseModel, Field
 
 from app.config import JEV_MODEL, OPENAI_MODEL
 from app.data.benchmark_queries import BENCHMARK_QUERIES
-from app.db import init_db, list_runs, save_run
-from app.services.browser_agent import run_browser_agent, stream_browser_agent, stream_compare
+from app.db import clear_runs, init_db, list_runs, save_run
+from app.services.browser_agent import run_browser_agent, stream_compare, stream_pipeline
 from app.services.pricing import DEFAULT_PRICING, estimate_cost
 from app.services.providers import ProviderError, call_jev_decision, call_openai_decision
 from app.tool_registry import TOOL_NAMES
@@ -150,20 +150,10 @@ async def agent_browser(payload: BrowserAgentRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/agent/browser/stream")
-async def agent_browser_stream(payload: BrowserAgentRequest) -> StreamingResponse:
-    """Live workflow: stream each stage (path chosen, latency, tokens) as it happens."""
-    if not payload.query.strip():
-        raise HTTPException(status_code=400, detail="Query must not be empty.")
-
+def _sse(agen) -> StreamingResponse:
     async def event_source():
         try:
-            async for event in stream_browser_agent(
-                payload.query,
-                jev_model=payload.jev_model,
-                openai_model=payload.openai_model,
-                temperature=payload.temperature,
-            ):
+            async for event in agen:
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:  # pragma: no cover
             yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
@@ -173,6 +163,34 @@ async def agent_browser_stream(payload: BrowserAgentRequest) -> StreamingRespons
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/agent/browser/stream")
+async def agent_browser_stream(payload: BrowserAgentRequest) -> StreamingResponse:
+    """Jev + LLM live workflow. Opens a VISIBLE browser so you can watch it."""
+    from app.config import BROWSER_HEADED
+
+    if not payload.query.strip():
+        raise HTTPException(status_code=400, detail="Query must not be empty.")
+    return _sse(stream_pipeline(
+        payload.query, "jev",
+        jev_model=payload.jev_model, openai_model=payload.openai_model,
+        temperature=payload.temperature, headed=BROWSER_HEADED,
+    ))
+
+
+@app.post("/api/agent/llm/stream")
+async def agent_llm_stream(payload: BrowserAgentRequest) -> StreamingResponse:
+    """LLM-only live workflow: LLM decides -> VISIBLE browser searches -> LLM writes the answer."""
+    from app.config import BROWSER_HEADED
+
+    if not payload.query.strip():
+        raise HTTPException(status_code=400, detail="Query must not be empty.")
+    return _sse(stream_pipeline(
+        payload.query, "llm",
+        jev_model=payload.jev_model, openai_model=payload.openai_model,
+        temperature=payload.temperature, headed=BROWSER_HEADED,
+    ))
 
 
 @app.post("/api/agent/compare/stream")
@@ -215,7 +233,8 @@ async def run_benchmark(payload: RunBenchmarkRequest) -> dict[str, Any]:
 
     for run_index in range(payload.runs):
         for query in query_pool:
-            expected = next((item.expected_tool for item in BENCHMARK_QUERIES if item.query == query), "no_tool")
+            # None when the query isn't in the labelled dataset — then we can't grade it.
+            expected = next((item.expected_tool for item in BENCHMARK_QUERIES if item.query == query), None)
             one_result: dict[str, Any] = {
                 "run_id": summary["run_id"],
                 "run_index": run_index + 1,
@@ -231,7 +250,7 @@ async def run_benchmark(payload: RunBenchmarkRequest) -> dict[str, Any]:
                     one_result["jev_input_tokens"] = metric["input_tokens"]
                     one_result["jev_output_tokens"] = metric["output_tokens"]
                     one_result["jev_estimated_cost"] = metric["estimated_cost"]
-                    one_result["jev_correct"] = decision.tool == expected
+                    one_result["jev_correct"] = (decision.tool == expected) if expected is not None else None
                     one_result["jev_model"] = payload.jev_model
                 except Exception as exc:  # pragma: no cover
                     one_result["jev_error"] = str(exc)
@@ -243,7 +262,7 @@ async def run_benchmark(payload: RunBenchmarkRequest) -> dict[str, Any]:
                     one_result["openai_input_tokens"] = metric["input_tokens"]
                     one_result["openai_output_tokens"] = metric["output_tokens"]
                     one_result["openai_estimated_cost"] = metric["estimated_cost"]
-                    one_result["openai_correct"] = decision.tool == expected
+                    one_result["openai_correct"] = (decision.tool == expected) if expected is not None else None
                     one_result["openai_model"] = payload.openai_model
                 except Exception as exc:  # pragma: no cover
                     one_result["openai_error"] = str(exc)
@@ -284,6 +303,12 @@ async def get_results() -> dict[str, Any]:
     return {"runs": list_runs()}
 
 
+@app.delete("/api/benchmark/results")
+async def delete_results() -> dict[str, Any]:
+    """Wipe all stored benchmark runs (useful after changing pricing/models)."""
+    return {"cleared": clear_runs()}
+
+
 @app.get("/api/benchmark/summary")
 async def get_summary() -> dict[str, Any]:
     rows = list_runs()
@@ -299,21 +324,28 @@ async def get_summary() -> dict[str, Any]:
         return {"total_runs": len(rows), "summary": {}}
 
     total = len(all_results)
-    jev_correct = sum(1 for row in all_results if row.get("jev_correct") is True)
-    openai_correct = sum(1 for row in all_results if row.get("openai_correct") is True)
-    jev_latency = [float(row["jev_latency_ms"]) for row in all_results if "jev_latency_ms" in row and row["jev_latency_ms"] is not None]
-    openai_latency = [float(row["openai_latency_ms"]) for row in all_results if "openai_latency_ms" in row and row["openai_latency_ms"] is not None]
+    # Accuracy only over results that have ground truth (jev_correct / openai_correct is a bool).
+    jev_graded = [row for row in all_results if isinstance(row.get("jev_correct"), bool)]
+    openai_graded = [row for row in all_results if isinstance(row.get("openai_correct"), bool)]
+    jev_correct = sum(1 for row in jev_graded if row["jev_correct"])
+    openai_correct = sum(1 for row in openai_graded if row["openai_correct"])
+    jev_latency = [float(row["jev_latency_ms"]) for row in all_results if row.get("jev_latency_ms") is not None]
+    openai_latency = [float(row["openai_latency_ms"]) for row in all_results if row.get("openai_latency_ms") is not None]
     jev_cost = sum(float(row.get("jev_estimated_cost") or 0) for row in all_results)
     openai_cost = sum(float(row.get("openai_estimated_cost") or 0) for row in all_results)
+    jev_agree = sum(1 for row in all_results if row.get("jev_tool") and row.get("jev_tool") == row.get("openai_tool"))
+    comparable = sum(1 for row in all_results if row.get("jev_tool") and row.get("openai_tool"))
     summary = {
         "total_tests": total,
-        "jev_accuracy": (jev_correct / total) * 100 if total else 0.0,
-        "openai_accuracy": (openai_correct / total) * 100 if total else 0.0,
+        "graded_tests": len(jev_graded) or len(openai_graded),
+        "jev_accuracy": (jev_correct / len(jev_graded)) * 100 if jev_graded else 0.0,
+        "openai_accuracy": (openai_correct / len(openai_graded)) * 100 if openai_graded else 0.0,
         "average_jev_latency_ms": sum(jev_latency) / len(jev_latency) if jev_latency else 0.0,
         "average_openai_latency_ms": sum(openai_latency) / len(openai_latency) if openai_latency else 0.0,
         "total_jev_cost": jev_cost,
         "total_openai_cost": openai_cost,
         "estimated_cost_savings_percent": ((openai_cost - jev_cost) / openai_cost * 100) if openai_cost else 0.0,
+        "tool_agreement_percent": (jev_agree / comparable * 100) if comparable else 0.0,
     }
     return {"total_runs": len(rows), "summary": summary}
 

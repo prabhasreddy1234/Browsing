@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import re
 import time
 from typing import Any, AsyncIterator, Optional
@@ -12,26 +13,156 @@ from .jev_system_one import MIN_CONFIDENCE, decide_tool
 from .providers import call_openai_decision, summarize_page
 
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+DOMAIN_RE = re.compile(r"\b((?:https?://)?(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+)\b", re.I)
+COMMON_TLDS = (".com", ".org", ".net", ".io", ".gov", ".edu", ".co", ".ai", ".dev", ".info", ".news", ".tv")
+# Words that mark the end of a search phrase, e.g. "search for NBA in wikipedia.org".
+_STOP_RE = re.compile(r"\b(?:in|on|at|from|using|within|website|site|web ?site|the web|google|browser)\b", re.I)
 
 
-def _resolve_target(query: str, tool: str) -> tuple[str, str]:
-    """Decide the URL to open based on the selected tool and the query."""
+# Popular sites we auto-correct obvious typos toward (e.g. "wikipidea.org").
+KNOWN_SITES = [
+    "wikipedia.org", "bing.com", "duckduckgo.com", "reddit.com", "stackoverflow.com",
+    "github.com", "youtube.com", "imdb.com", "amazon.com", "news.ycombinator.com",
+    "nytimes.com", "bbc.com", "cnn.com", "espn.com",
+]
+
+
+def _canonical_host(host: str) -> Optional[str]:
+    """If `host` is a close typo of a well-known site, return the correct one."""
+    h = host.lower()
+    if h.startswith("www."):
+        h = h[4:]
+    match = difflib.get_close_matches(h, KNOWN_SITES, n=1, cutoff=0.80)
+    if match and match[0] != h:
+        return match[0]
+    return None
+
+
+def _extract_site(query: str) -> Optional[str]:
+    """Find a website mentioned in the query (with or without scheme), fixing obvious typos."""
+    for match in DOMAIN_RE.finditer(query):
+        candidate = match.group(1)
+        host = candidate.split("//")[-1].split("/")[0].lower()
+        if not any(host.endswith(tld) for tld in COMMON_TLDS):
+            continue
+        corrected = _canonical_host(host)
+        if corrected:
+            return f"https://{corrected}"
+        return candidate if candidate.lower().startswith("http") else f"https://{candidate}"
+    return None
+
+
+def _extract_search_term(query: str) -> Optional[str]:
+    """Pull the thing to search for out of phrases like 'search for X in SITE'."""
+    for pattern in (r"search\s+for\s+(.+)", r"search\s+(.+)", r"look\s*up\s+(.+)", r"find\s+(.+)", r"query\s+(.+)"):
+        match = re.search(pattern, query, re.I)
+        if not match:
+            continue
+        term = match.group(1)
+        term = _STOP_RE.split(term)[0]          # cut off "... in <site>"
+        term = DOMAIN_RE.sub("", term)           # drop any domain left in the phrase
+        term = term.strip(" .,\"'\t")
+        if term:
+            return term
+    return None
+
+
+def _parse_intent(query: str, tool: str) -> dict[str, Any]:
+    """Turn the prompt into a concrete browser action.
+
+    Handles three shapes:
+      - "search for X in SITE"  -> open SITE and search it for X   (site_search)
+      - a URL / a bare site     -> open that page                  (fetch_webpage)
+      - anything else           -> a web search                    (web_search)
+    """
+    site = _extract_site(query)
+    term = _extract_search_term(query)
     urls = URL_RE.findall(query)
-    if tool == "fetch_webpage" and urls:
-        return urls[0], "fetch_webpage"
-    if urls:
-        return urls[0], "fetch_webpage"
-    # Default to a web search (no API key needed). Bing is friendlier to headless browsers.
-    return f"https://www.bing.com/search?q={quote_plus(query)}", "web_search"
+
+    if site and term:
+        return {"mode": "site_search", "url": site, "search_term": term}
+    if urls:  # a full URL (with its path) wins over a bare domain
+        return {"mode": "fetch_webpage", "url": urls[0], "search_term": None}
+    if site:
+        return {"mode": "fetch_webpage", "url": site, "search_term": None}
+    # Default: web search (Bing is friendlier to automated browsers than most).
+    return {"mode": "web_search", "url": f"https://www.bing.com/search?q={quote_plus(query)}", "search_term": None}
 
 
-async def _browse_with_playwright(target: str) -> dict[str, Any]:
-    """Open a real headless Chromium browser, navigate, and capture the page."""
+# Buttons that dismiss a cookie / consent dialog which would otherwise block typing.
+_CONSENT_SELECTORS = [
+    "button#L2AGLb",                       # Google "Accept all"
+    'button:has-text("Accept all")',
+    'button:has-text("I agree")',
+    'button:has-text("Agree")',
+    'button:has-text("Accept")',
+    'button:has-text("Got it")',
+]
+
+# Search boxes, most-specific first. `textarea[name="q"]` is Google's current box.
+_SEARCH_SELECTORS = [
+    'textarea[name="q"]',                  # Google (current)
+    'input[name="q"]',                     # Bing, older Google
+    "input#searchInput",                   # Wikipedia / MediaWiki
+    'input[name="search"]',
+    'input[type="search"]',
+    'input[name="query"]',
+    'textarea[aria-label*="search" i]',
+    'input[aria-label*="search" i]',
+    'input[placeholder*="search" i]',
+    'textarea[placeholder*="search" i]',
+    'input[title*="search" i]',
+]
+
+
+async def _perform_site_search(page, term: str) -> bool:
+    """Type `term` into the site's own search box and submit. Returns True if it found one."""
+    # Best-effort: clear a consent/cookie dialog that would block interaction.
+    for selector in _CONSENT_SELECTORS:
+        try:
+            button = await page.query_selector(selector)
+            if button:
+                await button.click(timeout=2000)
+                await page.wait_for_timeout(400)
+                break
+        except Exception:
+            pass
+
+    for selector in _SEARCH_SELECTORS:
+        try:
+            element = await page.query_selector(selector)
+        except Exception:
+            element = None
+        if not element:
+            continue
+        try:
+            await element.click()
+            await element.fill(term)
+            await element.press("Enter")
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            await page.wait_for_timeout(1200)  # let results render
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _browse_with_playwright(target: str, headed: bool = False, search_term: Optional[str] = None) -> dict[str, Any]:
+    """Open a real Chromium browser, navigate, optionally search on the site, and capture the page.
+
+    When `headed` is True the browser window is shown on screen and slowed down a
+    little so the automation is visible; otherwise it runs headless (invisible).
+    When `search_term` is set, the site's own search box is filled and submitted.
+    """
     from playwright.async_api import async_playwright  # imported lazily
 
     b0 = time.perf_counter()
+    searched_on_site = False
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=not headed, slow_mo=350 if headed else 0)
         try:
             page = await browser.new_page(
                 user_agent=(
@@ -40,20 +171,34 @@ async def _browse_with_playwright(target: str) -> dict[str, Any]:
                     "Chrome/124.0.0.0 Safari/537.36"
                 )
             )
+            if headed:
+                await page.bring_to_front()
             final_url = target
             status: Optional[int] = None
             response = await page.goto(target, wait_until="domcontentloaded", timeout=30000)
             if response is not None:
                 status = response.status
                 final_url = response.url
+            # Perform the search ON the site itself, if requested.
+            if search_term:
+                searched_on_site = await _perform_site_search(page, search_term)
+                final_url = page.url
             title = await page.title()
-            body_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+            # Prefer the main results/content region so the LLM gets the answer,
+            # not the page's nav and boilerplate.
+            body_text = await page.evaluate(
+                "() => { const m = document.querySelector('#b_results, #main, main, [role=main], article'); "
+                "const el = m || document.body; return el ? el.innerText : ''; }"
+            )
+            if headed:
+                # Keep the window on screen long enough to actually watch it.
+                await page.wait_for_timeout(2500)
         finally:
             await browser.close()
     browser_ms = (time.perf_counter() - b0) * 1000
-    snippet = " ".join((body_text or "").split())[:800]
+    snippet = " ".join((body_text or "").split())[:1500]
     return {
-        "engine": "playwright-chromium-headless",
+        "engine": "playwright-chromium-headed" if headed else "playwright-chromium-headless",
         "url": target,
         "final_url": final_url,
         "http_status": status,
@@ -61,24 +206,31 @@ async def _browse_with_playwright(target: str) -> dict[str, Any]:
         "snippet": snippet,
         "browser_time_ms": browser_ms,
         "fallback": False,
+        "searched_on_site": searched_on_site,
+        "search_term": search_term,
     }
 
 
-async def _browse_with_httpx(target: str, error: str) -> dict[str, Any]:
-    """Fallback used when Playwright / its browser binary is unavailable."""
+async def _browse_with_httpx(target: str, error: str, search_term: Optional[str] = None) -> dict[str, Any]:
+    """Fallback used when a real browser cannot open (no display / missing binary).
+
+    Cannot run a site's JS search box, so when a search was requested it falls
+    back to a Bing web search for the term instead of the bare site.
+    """
+    fetch_url = f"https://www.bing.com/search?q={quote_plus(search_term)}" if search_term else target
     b0 = time.perf_counter()
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         response = await client.get(
-            target,
+            fetch_url,
             headers={"User-Agent": "Mozilla/5.0 (compatible; JevBrowserAgent/1.0)"},
         )
     browser_ms = (time.perf_counter() - b0) * 1000
     text = re.sub(r"<[^>]+>", " ", response.text)
-    snippet = " ".join(text.split())[:800]
+    snippet = " ".join(text.split())[:1500]
     title_match = re.search(r"<title[^>]*>(.*?)</title>", response.text, re.IGNORECASE | re.DOTALL)
     return {
         "engine": "httpx-fallback",
-        "url": target,
+        "url": fetch_url,
         "final_url": str(response.url),
         "http_status": response.status_code,
         "title": title_match.group(1).strip() if title_match else "",
@@ -86,6 +238,8 @@ async def _browse_with_httpx(target: str, error: str) -> dict[str, Any]:
         "browser_time_ms": browser_ms,
         "fallback": True,
         "fallback_reason": error,
+        "searched_on_site": False,
+        "search_term": search_term,
     }
 
 
@@ -143,13 +297,15 @@ async def stream_pipeline(
     jev_model: Optional[str] = None,
     openai_model: Optional[str] = None,
     temperature: float = 0.2,
+    headed: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     """One pipeline as a live workflow: decide -> browse -> answer.
 
-    `approach` is "jev" (System One decides) or "llm" (the LLM decides). Emits
-    `step_start` / `step_end` (with latency, tokens, cost, cumulative totals) per
-    stage, then a `done` event with the full result. Every event carries the
-    `approach` so a merged comparison stream can tell the two apart.
+    `approach` is "jev" (System One decides) or "llm" (the LLM decides). When
+    `headed` is True the browser opens visibly on screen. Emits `step_start` /
+    `step_end` (with latency, tokens, cost, cumulative totals) per stage, then a
+    `done` event with the full result. Every event carries the `approach` so a
+    merged comparison stream can tell the two apart.
     """
     steps: list[dict[str, Any]] = []
     total_cost = 0.0
@@ -180,21 +336,35 @@ async def stream_pipeline(
     steps.append(step1)
     yield tag({"type": "step_end", "index": 1, "total": TOTAL_STEPS, **step1, **cumulative()})
 
-    # ── Step 2 — open a real browser and search the web ───────────────────────
+    # ── Step 2 — open a real browser and search the web / a specific site ─────
     selected_tool = decision["tool"]
-    target, browse_mode = _resolve_target(query, selected_tool)
-    yield tag({"type": "step_start", "index": 2, "total": TOTAL_STEPS, "step": "browser", "label": "Browser searches the web", "target": target, "mode": browse_mode})
+    intent = _parse_intent(query, selected_tool)
+    target = intent["url"]
+    browse_mode = intent["mode"]
+    search_term = intent["search_term"]
+    label2 = (
+        f"Browser searches '{search_term}' on the site" if browse_mode == "site_search"
+        else "Browser opens the page" if browse_mode == "fetch_webpage"
+        else "Browser searches the web"
+    )
+    yield tag({"type": "step_start", "index": 2, "total": TOTAL_STEPS, "step": "browser", "label": label2, "target": target, "mode": browse_mode, "search_term": search_term, "headed": headed})
     try:
-        browser_data = await _browse_with_playwright(target)
-    except Exception as exc:  # ImportError, missing binary, navigation error, etc.
-        browser_data = await _browse_with_httpx(target, str(exc))
+        # Hard cap so a stuck/headed browser can never hang the request forever.
+        browser_data = await asyncio.wait_for(
+            _browse_with_playwright(target, headed=headed, search_term=search_term),
+            timeout=60.0,
+        )
+    except Exception as exc:  # ImportError, missing binary, no display, timeout, nav error…
+        browser_data = await _browse_with_httpx(target, str(exc), search_term=search_term)
     step2 = {
         "step": "browser",
-        "label": "Browser searches the web",
+        "label": label2,
         "mode": browse_mode,
         "engine": browser_data["engine"],
         "url": browser_data["final_url"],
         "http_status": browser_data.get("http_status"),
+        "searched_on_site": browser_data.get("searched_on_site", False),
+        "search_term": search_term,
         "latency_ms": browser_data["browser_time_ms"],
         "cost": 0.0,
         "input_tokens": 0,
@@ -205,7 +375,8 @@ async def stream_pipeline(
 
     # ── Step 3 — the LLM writes an answer grounded in the page ────────────────
     yield tag({"type": "step_start", "index": 3, "total": TOTAL_STEPS, "step": "llm_answer", "label": "LLM writes the answer"})
-    summary, summary_metric = await summarize_page(query, browser_data.get("snippet", ""), openai_model, temperature)
+    answer_query = search_term or query
+    summary, summary_metric = await summarize_page(answer_query, browser_data.get("snippet", ""), openai_model, temperature)
     total_cost += float(summary_metric["estimated_cost"])
     total_input_tokens += int(summary_metric["input_tokens"])
     total_output_tokens += int(summary_metric["output_tokens"])
