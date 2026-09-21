@@ -1,0 +1,46 @@
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Python (backend) ----
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Node / frontend ----
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# ---- Data ----
+data/
+
+# ---- Logs ----
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+.env
+.env.*
+!.env.example
