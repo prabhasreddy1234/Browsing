@@ -1,15 +1,25 @@
 # Jev Decision Benchmark
 
-A local benchmark app for comparing a Jev-based routing layer against a traditional OpenAI model on the task of selecting the right tool for a user query.
+A local app for comparing a **Jev**-based decision layer against a traditional LLM on the task of selecting the right tool for a user query — and driving a real browser from Jev's decision.
+
+## What Jev is
+
+**Jev is TypeSafe's "System One" decision model.** It returns *typed, probabilistic decisions* (a choice with a confidence and per-option probabilities) in ~70–200 ms — it does **not** generate text. Pricing is **$0.042 per 1M input tokens, output free**.
+
+The design pattern:
+
+> **Jev makes the decision. An LLM writes the words. Your code owns the control flow.**
+
+When no `TYPESAFE_API_KEY` is set, the Jev layer runs in clearly-badged **simulation mode** (an offline heuristic with realistic System One latency). The same applies to the LLM when no `OPENAI_API_KEY` is set.
 
 ## Features
 
-- React + TypeScript frontend with dashboard and charts
+- React + TypeScript frontend with dashboard, charts, and two interactive agent tabs
 - FastAPI backend with SQLite persistence
-- Shared fixed tool registry and benchmark dataset
-- Runs decision calls against OpenAI and Jev/OpenRouter
+- Faithful Jev System One decision layer (typed choice, confidence, probabilities, input-only cost)
+- A real headless-Chromium browser agent driven by Jev's decision
 - Stores benchmark runs locally for later inspection
-- Includes a basic cost simulator and architecture comparison section
+- Includes a cost simulator and architecture comparison section
 
 ## Project structure
 
@@ -36,18 +46,31 @@ A local benchmark app for comparing a Jev-based routing layer against a traditio
    pip install -r requirements.txt
    ```
 
+4. Install the Chromium browser used by the browser agent tab:
+
+   ```bash
+   playwright install chromium
+   ```
+
+   If this step is skipped, the browser tab still works but falls back to a plain
+   HTTP fetch (marked as a fallback in the response) instead of a real browser.
+
 ## Configuration
 
 Create a `.env` file in the project root with values similar to:
 
 ```bash
+# Jev (TypeSafe System One) — typed decisions, $0.042/1M input, output free
+TYPESAFE_API_KEY=your-typesafe-key
+# LLM that "writes the words"
 OPENAI_API_KEY=your-openai-key
-OPENROUTER_API_KEY=your-openrouter-key
 OPENAI_MODEL=gpt-4o-mini
-JEV_MODEL=typesafe/jev-1.13
+# optional overrides
+JEV_IN_PER_M=0.042
+DEMO_BUDGET_USD=0.5
 ```
 
-Do not commit `.env`.
+Everything runs without keys: Jev falls back to a simulated System One heuristic and the LLM to a simulated summary, each badged in the UI. Do not commit `.env`.
 
 ## Run locally
 
@@ -103,6 +126,8 @@ total_cost = input_cost + output_cost
 
 A configurable default pricing table is defined in `backend/app/services/pricing.py` and can be adjusted without changing the frontend.
 
+**Jev is priced differently:** because System One returns a typed decision rather than generated text, it is billed on **input tokens only** at `JEV_IN_PER_M` ($0.042 per 1M by default), with output free. See `jev_cost_usd` in `backend/app/config.py` and the Jev layer in `backend/app/services/jev_system_one.py`.
+
 ## Cost simulator
 
 The dashboard includes a simple simulator that estimates cost based on request volume, average input tokens, and average output tokens.
@@ -117,8 +142,20 @@ It also includes a scenario where Jev routes requests and only a percentage of t
 - The benchmark intentionally keeps the tool set fixed and simple to reduce confounding factors.
 - Cost estimates are approximate based on configured pricing tables when the provider does not return direct pricing metadata.
 
+## Tabs
+
+The frontend has three working tabs (switch via the sidebar):
+
+- **Dashboard** — the full benchmark dashboard (Jev vs LLM across the dataset).
+- **LLM Only** — enter a query; the LLM alone picks a tool (the traditional baseline, no Jev, no browser). Logs time and cost.
+- **Jev + LLM (Browser)** — enter a query (or a URL). **Jev decides** the tool (a typed System One choice with confidence + probabilities), **your code opens** a real headless Chromium browser, and **the LLM writes** an answer grounded in the page. A **live workflow** streams each stage as it happens: which path was chosen, a running elapsed timer, per-step latency, tokens consumed, and cost — with cumulative totals. When it finishes it also shows the Jev decision (with a live/simulated badge), the probability bars, the LLM answer, a per-step breakdown, and the captured page.
+
 ## API endpoints
 
+- `GET  /api/status` — whether Jev and the LLM are live or simulated, Jev's price, and the demo budget.
+- `POST /api/agent/llm-only` — LLM-only tool decision with time and cost.
+- `POST /api/agent/browser` — Jev decides → browser opens → LLM answers; returns the Jev decision, steps, total time, and total cost.
+- `POST /api/agent/browser/stream` — the same flow as a live Server-Sent Events stream (`step_start` / `step_end` / `done`), each event carrying per-step latency, tokens, cost, and cumulative totals.
 - `POST /api/decision/jev`
 - `POST /api/decision/openai`
 - `POST /api/benchmark/run`
@@ -131,3 +168,5 @@ It also includes a scenario where Jev routes requests and only a percentage of t
 ## Notes
 
 This project is designed to run locally on a development machine without Docker or cloud deployment.
+
+The Jev System One pattern — typed decisions, input-only pricing, simulation-without-keys, and the "Jev decides / LLM writes / code owns control flow" separation — is implemented on this Python/FastAPI + React stack.

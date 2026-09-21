@@ -66,7 +66,121 @@ const EMPTY_SUMMARY: DashboardSummary = {
   estimated_cost_savings_percent: 0,
 };
 
+type TabKey = 'dashboard' | 'llm' | 'browser';
+
+type LlmOnlyResult = {
+  mode: string;
+  query: string;
+  selected_tool: string;
+  decision: { tool: string; confidence: number; reason: string };
+  total_time_ms: number;
+  total_cost: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  model?: string;
+};
+
+type AgentStep = {
+  step: string;
+  label: string;
+  tool?: string;
+  confidence?: number;
+  probabilities?: Record<string, number>;
+  simulated?: boolean;
+  reason?: string;
+  mode?: string;
+  engine?: string;
+  url?: string;
+  http_status?: number | null;
+  latency_ms: number;
+  cost: number;
+};
+
+type BrowserResult = {
+  query: string;
+  selected_tool: string;
+  jev: {
+    tool: string;
+    confidence: number;
+    probabilities: Record<string, number>;
+    clarity: number;
+    simulated: boolean;
+    low_confidence: boolean;
+    latency_ms: number;
+    cost: number;
+    input_tokens: number;
+  };
+  answer: string;
+  browser: {
+    engine: string;
+    url: string;
+    final_url: string;
+    http_status?: number | null;
+    title: string;
+    snippet: string;
+    browser_time_ms: number;
+    fallback: boolean;
+    fallback_reason?: string;
+  };
+  steps: AgentStep[];
+  total_time_ms: number;
+  total_cost: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+};
+
+type AppStatus = {
+  jev: string;
+  jev_in_per_m: number;
+  jev_note: string;
+  llm: string;
+  llm_model: string;
+  budget_usd: number;
+};
+
+type LiveStep = {
+  index: number;
+  total: number;
+  step: string;
+  label: string;
+  status: 'running' | 'done';
+  startedAt: number;
+  latency_ms?: number;
+  cost?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  tool?: string;
+  confidence?: number;
+  simulated?: boolean;
+  engine?: string;
+  http_status?: number | null;
+  url?: string;
+  target?: string;
+  mode?: string;
+  cumulative_time_ms?: number;
+  cumulative_cost?: number;
+  cumulative_input_tokens?: number;
+  cumulative_output_tokens?: number;
+};
+
 function App() {
+  const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
+  const [appStatus, setAppStatus] = useState<AppStatus | null>(null);
+
+  // LLM-only tab state
+  const [llmQuery, setLlmQuery] = useState('What is the capital of Australia?');
+  const [llmResult, setLlmResult] = useState<LlmOnlyResult | null>(null);
+  const [llmLoading, setLlmLoading] = useState(false);
+  const [llmError, setLlmError] = useState('');
+
+  // Jev + LLM browser tab state
+  const [browserQuery, setBrowserQuery] = useState('Find information about Android 16');
+  const [browserResult, setBrowserResult] = useState<BrowserResult | null>(null);
+  const [browserLoading, setBrowserLoading] = useState(false);
+  const [browserError, setBrowserError] = useState('');
+  const [liveSteps, setLiveSteps] = useState<LiveStep[]>([]);
+  const [nowTick, setNowTick] = useState(0);
+
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [results, setResults] = useState<ResultRow[]>([]);
   const [runs, setRuns] = useState<BenchmarkRun[]>([]);
@@ -132,7 +246,18 @@ function App() {
     setQueries((data.queries || []).map((row: any) => row.query));
   };
 
+  const fetchStatus = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/status`);
+      const data = await response.json();
+      setAppStatus(data as AppStatus);
+    } catch (error) {
+      setAppStatus(null);
+    }
+  };
+
   const refreshData = async () => {
+    await fetchStatus();
     await fetchSummary();
     await fetchResults();
     await fetchQueries();
@@ -141,6 +266,13 @@ function App() {
   useEffect(() => {
     refreshData();
   }, []);
+
+  // Ticks while the browser agent runs, so the active step shows a live elapsed timer.
+  useEffect(() => {
+    if (!browserLoading) return;
+    const id = setInterval(() => setNowTick(Date.now()), 100);
+    return () => clearInterval(id);
+  }, [browserLoading]);
 
   const latencyChartData = useMemo(() => {
     const jev = results.filter((row) => row.jev_latency_ms != null).map((row) => row.jev_latency_ms as number);
@@ -248,27 +380,157 @@ function App() {
     setSummary(null);
   };
 
+  const runLlmOnly = async () => {
+    if (!llmQuery.trim()) return;
+    setLlmLoading(true);
+    setLlmError('');
+    setLlmResult(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/agent/llm-only`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: llmQuery.trim(), temperature: 0 }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Request failed');
+      setLlmResult(data as LlmOnlyResult);
+    } catch (error) {
+      setLlmError(String(error instanceof Error ? error.message : error));
+    } finally {
+      setLlmLoading(false);
+    }
+  };
+
+  const handleStreamEvent = (ev: any) => {
+    if (ev.type === 'step_start') {
+      setLiveSteps((prev) => [
+        ...prev,
+        {
+          index: ev.index,
+          total: ev.total,
+          step: ev.step,
+          label: ev.label,
+          status: 'running',
+          startedAt: Date.now(),
+          target: ev.target,
+          mode: ev.mode,
+        },
+      ]);
+    } else if (ev.type === 'step_end') {
+      setLiveSteps((prev) =>
+        prev.map((s) =>
+          s.step === ev.step && s.status === 'running'
+            ? {
+                ...s,
+                status: 'done',
+                latency_ms: ev.latency_ms,
+                cost: ev.cost,
+                input_tokens: ev.input_tokens,
+                output_tokens: ev.output_tokens,
+                tool: ev.tool,
+                confidence: ev.confidence,
+                simulated: ev.simulated,
+                engine: ev.engine,
+                http_status: ev.http_status,
+                url: ev.url,
+                cumulative_time_ms: ev.cumulative_time_ms,
+                cumulative_cost: ev.cumulative_cost,
+                cumulative_input_tokens: ev.cumulative_input_tokens,
+                cumulative_output_tokens: ev.cumulative_output_tokens,
+              }
+            : s
+        )
+      );
+    } else if (ev.type === 'done') {
+      setBrowserResult(ev.result as BrowserResult);
+    } else if (ev.type === 'error') {
+      setBrowserError(String(ev.error));
+    }
+  };
+
+  const runBrowserAgent = async () => {
+    if (!browserQuery.trim()) return;
+    setBrowserLoading(true);
+    setBrowserError('');
+    setBrowserResult(null);
+    setLiveSteps([]);
+    try {
+      const response = await fetch(`${API_BASE}/api/agent/browser/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: browserQuery.trim(), temperature: 0.2 }),
+      });
+      if (!response.ok || !response.body) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || 'Request failed');
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      // Parse the Server-Sent Events stream: events are separated by a blank line.
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+        for (const part of parts) {
+          const dataLine = part.split('\n').find((l) => l.startsWith('data:'));
+          if (!dataLine) continue;
+          try {
+            handleStreamEvent(JSON.parse(dataLine.slice(5).trim()));
+          } catch {
+            /* ignore malformed chunk */
+          }
+        }
+      }
+    } catch (error) {
+      setBrowserError(String(error instanceof Error ? error.message : error));
+    } finally {
+      setBrowserLoading(false);
+    }
+  };
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <h1>Jev Decision Benchmark</h1>
         <nav>
-          <button className="nav-link active">Dashboard</button>
-          <button className="nav-link">Run Experiment</button>
-          <button className="nav-link">Benchmark Results</button>
-          <button className="nav-link">Cost Analysis</button>
-          <button className="nav-link">Settings</button>
+          <button
+            className={`nav-link ${activeTab === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setActiveTab('dashboard')}
+          >
+            Dashboard
+          </button>
+          <button
+            className={`nav-link ${activeTab === 'llm' ? 'active' : ''}`}
+            onClick={() => setActiveTab('llm')}
+          >
+            LLM Only
+          </button>
+          <button
+            className={`nav-link ${activeTab === 'browser' ? 'active' : ''}`}
+            onClick={() => setActiveTab('browser')}
+          >
+            Jev + LLM (Browser)
+          </button>
         </nav>
       </aside>
 
       <main className="content">
         <header className="topbar">
           <div>
-            <h2>Benchmark Dashboard</h2>
+            <h2>
+              {activeTab === 'dashboard' && 'Benchmark Dashboard'}
+              {activeTab === 'llm' && 'LLM Only — tool decision'}
+              {activeTab === 'browser' && 'Jev + LLM — live browser agent'}
+            </h2>
           </div>
           <div className={`status ${statusClass}`}>{status}</div>
         </header>
 
+        {activeTab === 'dashboard' && (
+        <>
         <section className="kpis">
           <div className="card">
             <span>Total Tests</span>
@@ -507,6 +769,289 @@ OpenAI LLM only when required</pre>
           <h3>API response</h3>
           <pre>{jsonPayload || 'No benchmark results yet.'}</pre>
         </section>
+        </>
+        )}
+
+        {activeTab === 'llm' && (
+          <section className="agent-view">
+            <div className="panel">
+              <h3>LLM only</h3>
+              <p className="muted">
+                The query goes straight to the LLM, which selects one tool. No Jev routing and no
+                browser — this is the traditional baseline. Time and cost are logged below.
+              </p>
+              <textarea
+                value={llmQuery}
+                onChange={(e) => setLlmQuery(e.target.value)}
+                placeholder="Ask something, e.g. What is the capital of Australia?"
+              />
+              <div className="button-row">
+                <button onClick={runLlmOnly} disabled={llmLoading}>
+                  {llmLoading ? 'Running...' : 'Run LLM'}
+                </button>
+              </div>
+              {llmError && <p className="error-text">{llmError}</p>}
+            </div>
+
+            {llmResult && (
+              <>
+                <section className="kpis">
+                  <div className="card">
+                    <span>Selected tool</span>
+                    <strong>{llmResult.selected_tool}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Confidence</span>
+                    <strong>{`${(Number(llmResult.decision.confidence) * 100).toFixed(0)}%`}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Time</span>
+                    <strong>{`${Number(llmResult.total_time_ms).toFixed(0)} ms`}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Cost</span>
+                    <strong>{currency(llmResult.total_cost)}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Input tokens</span>
+                    <strong>{llmResult.total_input_tokens}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Output tokens</span>
+                    <strong>{llmResult.total_output_tokens}</strong>
+                  </div>
+                </section>
+                <div className="panel">
+                  <h3>Reasoning</h3>
+                  <p>{llmResult.decision.reason}</p>
+                  <p className="muted">Model: {llmResult.model || '—'}</p>
+                </div>
+              </>
+            )}
+          </section>
+        )}
+
+        {activeTab === 'browser' && (
+          <section className="agent-view">
+            <div className="panel">
+              <h3>
+                Jev + LLM with a real browser{' '}
+                {appStatus && (
+                  <span className={`badge ${appStatus.jev === 'live' ? 'badge-live' : 'badge-sim'}`}>
+                    Jev: {appStatus.jev}
+                  </span>
+                )}
+                {appStatus && (
+                  <span className={`badge ${appStatus.llm === 'live' ? 'badge-live' : 'badge-sim'}`}>
+                    LLM: {appStatus.llm}
+                  </span>
+                )}
+              </h3>
+              <p className="muted">
+                <strong>Jev makes the decision</strong> (a typed System One choice — input-billed only
+                at ${appStatus ? appStatus.jev_in_per_m : 0.042}/1M, output free). <strong>Your code owns
+                the control flow</strong> and opens a real headless Chromium browser. <strong>The LLM
+                writes the words</strong> — a short answer grounded in the page. Time and cost are logged
+                per step below.
+              </p>
+              <textarea
+                value={browserQuery}
+                onChange={(e) => setBrowserQuery(e.target.value)}
+                placeholder="e.g. Find information about Android 16, or paste a URL to open"
+              />
+              <div className="button-row">
+                <button onClick={runBrowserAgent} disabled={browserLoading}>
+                  {browserLoading ? 'Opening browser...' : 'Run browser agent'}
+                </button>
+              </div>
+              {browserError && <p className="error-text">{browserError}</p>}
+            </div>
+
+            {liveSteps.length > 0 && (
+              <div className="panel">
+                <h3>
+                  Live workflow{' '}
+                  <span className="muted">
+                    {liveSteps.filter((s) => s.status === 'done').length}/{liveSteps[0]?.total ?? 3} steps
+                  </span>
+                </h3>
+                <div className="wf-progress">
+                  <div
+                    className="wf-progress-fill"
+                    style={{
+                      width: `${(liveSteps.filter((s) => s.status === 'done').length / (liveSteps[0]?.total ?? 3)) * 100}%`,
+                    }}
+                  />
+                </div>
+                <ol className="workflow">
+                  {liveSteps.map((s) => {
+                    const elapsed =
+                      s.status === 'running' ? (nowTick - s.startedAt) / 1000 : (s.latency_ms ?? 0) / 1000;
+                    return (
+                      <li key={`${s.step}-${s.index}`} className={`workflow-step ${s.status}`}>
+                        <span className="wf-dot" />
+                        <div className="wf-body">
+                          <div className="wf-head">
+                            <span className="wf-label">
+                              {s.index}/{s.total} · {s.label}
+                            </span>
+                            <span className="wf-time">
+                              {s.status === 'running' ? `${elapsed.toFixed(1)}s…` : `${(s.latency_ms ?? 0).toFixed(0)} ms`}
+                            </span>
+                          </div>
+                          <div className="wf-detail">
+                            {s.step === 'jev_decide' &&
+                              (s.status === 'done' ? (
+                                <>
+                                  chose <strong>{s.tool}</strong> @ {(Number(s.confidence) * 100).toFixed(0)}%
+                                  {s.simulated ? ' (simulated)' : ''}
+                                </>
+                              ) : (
+                                'deciding the path…'
+                              ))}
+                            {s.step === 'browser' &&
+                              (s.status === 'running' ? (
+                                <>opening {s.target}</>
+                              ) : (
+                                <>
+                                  {s.engine} → {s.url} {s.http_status ? `(${s.http_status})` : ''}
+                                </>
+                              ))}
+                            {s.step === 'llm_answer' && (s.status === 'done' ? 'answer written' : 'writing the answer…')}
+                          </div>
+                          {s.status === 'done' && (
+                            <div className="wf-metrics">
+                              <span>
+                                tokens {s.input_tokens ?? 0} → {s.output_tokens ?? 0}
+                              </span>
+                              <span>cost {currency(s.cost ?? 0)}</span>
+                              {s.cumulative_time_ms != null && (
+                                <span>elapsed {(s.cumulative_time_ms / 1000).toFixed(1)}s</span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
+              </div>
+            )}
+
+            {browserResult && (
+              <>
+                <section className="kpis">
+                  <div className="card">
+                    <span>Selected tool</span>
+                    <strong>{browserResult.selected_tool}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Total time</span>
+                    <strong>{`${Number(browserResult.total_time_ms).toFixed(0)} ms`}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Total cost</span>
+                    <strong>{currency(browserResult.total_cost)}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Browser time</span>
+                    <strong>{`${Number(browserResult.browser.browser_time_ms).toFixed(0)} ms`}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Input tokens</span>
+                    <strong>{browserResult.total_input_tokens}</strong>
+                  </div>
+                  <div className="card">
+                    <span>Output tokens</span>
+                    <strong>{browserResult.total_output_tokens}</strong>
+                  </div>
+                </section>
+
+                <div className="panel">
+                  <h3>
+                    Jev decision (System One){' '}
+                    <span className={`badge ${browserResult.jev.simulated ? 'badge-sim' : 'badge-live'}`}>
+                      {browserResult.jev.simulated ? 'simulated' : 'live'}
+                    </span>
+                    {browserResult.jev.low_confidence && (
+                      <span className="badge badge-warn">low confidence</span>
+                    )}
+                  </h3>
+                  <p>
+                    Chose <strong>{browserResult.jev.tool}</strong> at{' '}
+                    <strong>{`${(browserResult.jev.confidence * 100).toFixed(0)}%`}</strong> confidence in{' '}
+                    {`${browserResult.jev.latency_ms.toFixed(0)} ms`} for {currency(browserResult.jev.cost)}.
+                  </p>
+                  <div className="prob-bars">
+                    {Object.entries(browserResult.jev.probabilities)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([tool, prob]) => (
+                        <div key={tool} className="prob-row">
+                          <span className="prob-label">{tool}</span>
+                          <div className="prob-track">
+                            <div
+                              className="prob-fill"
+                              style={{ width: `${Math.max(2, prob * 100)}%` }}
+                            />
+                          </div>
+                          <span className="prob-val">{`${(prob * 100).toFixed(0)}%`}</span>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+
+                <div className="panel">
+                  <h3>LLM answer (grounded in the page)</h3>
+                  <p>{browserResult.answer}</p>
+                </div>
+
+                <div className="panel">
+                  <h3>Agent steps (time &amp; cost per step)</h3>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Step</th>
+                          <th>Detail</th>
+                          <th>Time</th>
+                          <th>Cost</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {browserResult.steps.map((step, idx) => (
+                          <tr key={`${step.step}-${idx}`}>
+                            <td>{step.label}</td>
+                            <td>
+                              {step.step === 'browser'
+                                ? `${step.engine} → ${step.url}${step.http_status ? ` (${step.http_status})` : ''}`
+                                : step.reason || step.tool || '—'}
+                            </td>
+                            <td>{`${Number(step.latency_ms).toFixed(0)} ms`}</td>
+                            <td>{currency(step.cost)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="panel">
+                  <h3>Browser result</h3>
+                  <p className="muted">
+                    Engine: {browserResult.browser.engine}
+                    {browserResult.browser.fallback &&
+                      ' (Playwright unavailable — fell back to HTTP fetch. Run "playwright install chromium".)'}
+                  </p>
+                  <p>
+                    <strong>{browserResult.browser.title || '(no title)'}</strong>
+                  </p>
+                  <p className="muted">{browserResult.browser.final_url}</p>
+                  <pre>{browserResult.browser.snippet || '(no text captured)'}</pre>
+                </div>
+              </>
+            )}
+          </section>
+        )}
       </main>
     </div>
   );

@@ -7,11 +7,13 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import JEV_MODEL, OPENAI_MODEL
 from app.data.benchmark_queries import BENCHMARK_QUERIES
 from app.db import init_db, list_runs, save_run
+from app.services.browser_agent import run_browser_agent, stream_browser_agent
 from app.services.pricing import DEFAULT_PRICING, estimate_cost
 from app.services.providers import ProviderError, call_jev_decision, call_openai_decision
 from app.tool_registry import TOOL_NAMES
@@ -50,6 +52,21 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/status")
+async def status() -> dict[str, Any]:
+    """Reference-style status: is Jev live or simulated, its price, LLM keys, budget."""
+    from app.config import DEMO_BUDGET_USD, JEV_IN_PER_M, OPENAI_API_KEY, has_jev_key
+
+    return {
+        "jev": "live" if has_jev_key() else "simulated",
+        "jev_in_per_m": JEV_IN_PER_M,
+        "jev_note": "Typed System One decisions — input-billed only, output free.",
+        "llm": "live" if OPENAI_API_KEY else "simulated",
+        "llm_model": OPENAI_MODEL,
+        "budget_usd": DEMO_BUDGET_USD,
+    }
+
+
 @app.post("/api/decision/jev")
 async def decide_jev(payload: DecisionRequest) -> dict[str, Any]:
     try:
@@ -75,6 +92,87 @@ async def decide_openai(payload: DecisionRequest) -> dict[str, Any]:
 @app.get("/api/tools")
 async def tools() -> dict[str, list[str]]:
     return {"tools": sorted(TOOL_NAMES)}
+
+
+class LlmOnlyRequest(BaseModel):
+    query: str
+    model: Optional[str] = None
+    temperature: float = 0.0
+
+
+@app.post("/api/agent/llm-only")
+async def agent_llm_only(payload: LlmOnlyRequest) -> dict[str, Any]:
+    """Tab 1 — pure LLM: the model alone selects a tool. Logs time and cost."""
+    if not payload.query.strip():
+        raise HTTPException(status_code=400, detail="Query must not be empty.")
+    try:
+        decision, metric = await call_openai_decision(payload.query, payload.model, payload.temperature)
+    except ProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "mode": "llm-only",
+        "query": payload.query,
+        "selected_tool": decision.tool,
+        "decision": decision.model_dump(),
+        "total_time_ms": metric["latency_ms"],
+        "total_cost": metric["estimated_cost"],
+        "total_input_tokens": metric["input_tokens"],
+        "total_output_tokens": metric["output_tokens"],
+        "model": metric.get("model"),
+        "metrics": metric,
+    }
+
+
+class BrowserAgentRequest(BaseModel):
+    query: str
+    jev_model: Optional[str] = None
+    openai_model: Optional[str] = None
+    temperature: float = 0.0
+
+
+@app.post("/api/agent/browser")
+async def agent_browser(payload: BrowserAgentRequest) -> dict[str, Any]:
+    """Tab 2 — Jev + LLM that actually opens a browser. Logs time and cost."""
+    if not payload.query.strip():
+        raise HTTPException(status_code=400, detail="Query must not be empty.")
+    try:
+        return await run_browser_agent(
+            payload.query,
+            jev_model=payload.jev_model,
+            openai_model=payload.openai_model,
+            temperature=payload.temperature,
+        )
+    except ProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/agent/browser/stream")
+async def agent_browser_stream(payload: BrowserAgentRequest) -> StreamingResponse:
+    """Live workflow: stream each stage (path chosen, latency, tokens) as it happens."""
+    if not payload.query.strip():
+        raise HTTPException(status_code=400, detail="Query must not be empty.")
+
+    async def event_source():
+        try:
+            async for event in stream_browser_agent(
+                payload.query,
+                jev_model=payload.jev_model,
+                openai_model=payload.openai_model,
+                temperature=payload.temperature,
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:  # pragma: no cover
+            yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/benchmark/run")
