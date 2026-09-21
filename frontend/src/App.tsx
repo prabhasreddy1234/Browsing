@@ -66,7 +66,23 @@ const EMPTY_SUMMARY: DashboardSummary = {
   estimated_cost_savings_percent: 0,
 };
 
-type TabKey = 'dashboard' | 'llm' | 'browser';
+type TabKey = 'dashboard' | 'llm' | 'browser' | 'compare';
+
+type Comparison = {
+  same_tool: boolean;
+  jev_tool: string;
+  llm_tool: string;
+  decision_latency_ms: { jev: number; llm: number };
+  decision_cost: { jev: number; llm: number };
+  decision_tokens: { jev: number; llm: number };
+  total_time_ms: { jev: number; llm: number };
+  total_cost: { jev: number; llm: number };
+  total_tokens: { jev: number; llm: number };
+  decision_cost_savings_pct: number;
+  decision_latency_savings_pct: number;
+  total_cost_savings_pct: number;
+  total_time_savings_pct: number;
+};
 
 type LlmOnlyResult = {
   mode: string;
@@ -97,8 +113,12 @@ type AgentStep = {
 };
 
 type BrowserResult = {
+  approach?: string;
   query: string;
   selected_tool: string;
+  decision_latency_ms?: number;
+  decision_cost?: number;
+  decision_tokens?: number;
   jev: {
     tool: string;
     confidence: number;
@@ -163,6 +183,61 @@ type LiveStep = {
   cumulative_output_tokens?: number;
 };
 
+function WorkflowSteps({ steps, nowTick }: { steps: LiveStep[]; nowTick: number }) {
+  return (
+    <ol className="workflow">
+      {steps.map((s) => {
+        const elapsed = s.status === 'running' ? (nowTick - s.startedAt) / 1000 : (s.latency_ms ?? 0) / 1000;
+        return (
+          <li key={`${s.step}-${s.index}`} className={`workflow-step ${s.status}`}>
+            <span className="wf-dot" />
+            <div className="wf-body">
+              <div className="wf-head">
+                <span className="wf-label">
+                  {s.index}/{s.total} · {s.label}
+                </span>
+                <span className="wf-time">
+                  {s.status === 'running' ? `${elapsed.toFixed(1)}s…` : `${(s.latency_ms ?? 0).toFixed(0)} ms`}
+                </span>
+              </div>
+              <div className="wf-detail">
+                {(s.step === 'jev_decide' || s.step === 'llm_decide') &&
+                  (s.status === 'done' ? (
+                    <>
+                      chose <strong>{s.tool}</strong>
+                      {s.confidence != null ? ` @ ${(Number(s.confidence) * 100).toFixed(0)}%` : ''}
+                      {s.simulated ? ' (simulated)' : ''}
+                    </>
+                  ) : (
+                    'deciding the path…'
+                  ))}
+                {s.step === 'browser' &&
+                  (s.status === 'running' ? (
+                    <>searching {s.target}</>
+                  ) : (
+                    <>
+                      {s.engine} → {s.url} {s.http_status ? `(${s.http_status})` : ''}
+                    </>
+                  ))}
+                {s.step === 'llm_answer' && (s.status === 'done' ? 'answer written' : 'writing the answer…')}
+              </div>
+              {s.status === 'done' && (
+                <div className="wf-metrics">
+                  <span>
+                    tokens {s.input_tokens ?? 0} → {s.output_tokens ?? 0}
+                  </span>
+                  <span>cost {currency(s.cost ?? 0)}</span>
+                  {s.cumulative_time_ms != null && <span>elapsed {(s.cumulative_time_ms / 1000).toFixed(1)}s</span>}
+                </div>
+              )}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
   const [appStatus, setAppStatus] = useState<AppStatus | null>(null);
@@ -180,6 +255,16 @@ function App() {
   const [browserError, setBrowserError] = useState('');
   const [liveSteps, setLiveSteps] = useState<LiveStep[]>([]);
   const [nowTick, setNowTick] = useState(0);
+
+  // Compare tab state (Jev+LLM vs LLM-only, side by side)
+  const [compareQuery, setCompareQuery] = useState('What is the latest news about Android 16?');
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState('');
+  const [jevSteps, setJevSteps] = useState<LiveStep[]>([]);
+  const [llmSteps, setLlmSteps] = useState<LiveStep[]>([]);
+  const [jevResult, setJevResult] = useState<BrowserResult | null>(null);
+  const [cmpLlmResult, setCmpLlmResult] = useState<BrowserResult | null>(null);
+  const [comparison, setComparison] = useState<Comparison | null>(null);
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [results, setResults] = useState<ResultRow[]>([]);
@@ -267,12 +352,12 @@ function App() {
     refreshData();
   }, []);
 
-  // Ticks while the browser agent runs, so the active step shows a live elapsed timer.
+  // Ticks while an agent runs, so the active step shows a live elapsed timer.
   useEffect(() => {
-    if (!browserLoading) return;
+    if (!browserLoading && !compareLoading) return;
     const id = setInterval(() => setNowTick(Date.now()), 100);
     return () => clearInterval(id);
-  }, [browserLoading]);
+  }, [browserLoading, compareLoading]);
 
   const latencyChartData = useMemo(() => {
     const jev = results.filter((row) => row.jev_latency_ms != null).map((row) => row.jev_latency_ms as number);
@@ -401,23 +486,47 @@ function App() {
     }
   };
 
-  const handleStreamEvent = (ev: any) => {
+  // Parse a Server-Sent Events stream (events separated by a blank line).
+  const streamSSE = async (path: string, body: unknown, onEvent: (ev: any) => void) => {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok || !response.body) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || 'Request failed');
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+      for (const part of parts) {
+        const dataLine = part.split('\n').find((l) => l.startsWith('data:'));
+        if (!dataLine) continue;
+        try {
+          onEvent(JSON.parse(dataLine.slice(5).trim()));
+        } catch {
+          /* ignore malformed chunk */
+        }
+      }
+    }
+  };
+
+  // Apply a step_start / step_end event to a live-steps state setter.
+  const applyStepEvent = (setSteps: React.Dispatch<React.SetStateAction<LiveStep[]>>, ev: any) => {
     if (ev.type === 'step_start') {
-      setLiveSteps((prev) => [
+      setSteps((prev) => [
         ...prev,
-        {
-          index: ev.index,
-          total: ev.total,
-          step: ev.step,
-          label: ev.label,
-          status: 'running',
-          startedAt: Date.now(),
-          target: ev.target,
-          mode: ev.mode,
-        },
+        { index: ev.index, total: ev.total, step: ev.step, label: ev.label, status: 'running', startedAt: Date.now(), target: ev.target, mode: ev.mode },
       ]);
     } else if (ev.type === 'step_end') {
-      setLiveSteps((prev) =>
+      setSteps((prev) =>
         prev.map((s) =>
           s.step === ev.step && s.status === 'running'
             ? {
@@ -441,10 +550,6 @@ function App() {
             : s
         )
       );
-    } else if (ev.type === 'done') {
-      setBrowserResult(ev.result as BrowserResult);
-    } else if (ev.type === 'error') {
-      setBrowserError(String(ev.error));
     }
   };
 
@@ -455,39 +560,44 @@ function App() {
     setBrowserResult(null);
     setLiveSteps([]);
     try {
-      const response = await fetch(`${API_BASE}/api/agent/browser/stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: browserQuery.trim(), temperature: 0.2 }),
+      await streamSSE('/api/agent/browser/stream', { query: browserQuery.trim(), temperature: 0.2 }, (ev) => {
+        applyStepEvent(setLiveSteps, ev);
+        if (ev.type === 'done') setBrowserResult(ev.result as BrowserResult);
+        else if (ev.type === 'error') setBrowserError(String(ev.error));
       });
-      if (!response.ok || !response.body) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.detail || 'Request failed');
-      }
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      // Parse the Server-Sent Events stream: events are separated by a blank line.
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() || '';
-        for (const part of parts) {
-          const dataLine = part.split('\n').find((l) => l.startsWith('data:'));
-          if (!dataLine) continue;
-          try {
-            handleStreamEvent(JSON.parse(dataLine.slice(5).trim()));
-          } catch {
-            /* ignore malformed chunk */
-          }
-        }
-      }
     } catch (error) {
       setBrowserError(String(error instanceof Error ? error.message : error));
     } finally {
       setBrowserLoading(false);
+    }
+  };
+
+  const runCompare = async () => {
+    if (!compareQuery.trim()) return;
+    setCompareLoading(true);
+    setCompareError('');
+    setJevSteps([]);
+    setLlmSteps([]);
+    setJevResult(null);
+    setCmpLlmResult(null);
+    setComparison(null);
+    try {
+      await streamSSE('/api/agent/compare/stream', { query: compareQuery.trim(), temperature: 0.2 }, (ev) => {
+        const setSteps = ev.approach === 'llm' ? setLlmSteps : setJevSteps;
+        applyStepEvent(setSteps, ev);
+        if (ev.type === 'done') {
+          if (ev.result.approach === 'llm') setCmpLlmResult(ev.result as BrowserResult);
+          else setJevResult(ev.result as BrowserResult);
+        } else if (ev.type === 'comparison') {
+          setComparison(ev.comparison as Comparison);
+        } else if (ev.type === 'error') {
+          setCompareError(String(ev.error));
+        }
+      });
+    } catch (error) {
+      setCompareError(String(error instanceof Error ? error.message : error));
+    } finally {
+      setCompareLoading(false);
     }
   };
 
@@ -514,6 +624,12 @@ function App() {
           >
             Jev + LLM (Browser)
           </button>
+          <button
+            className={`nav-link ${activeTab === 'compare' ? 'active' : ''}`}
+            onClick={() => setActiveTab('compare')}
+          >
+            Compare (Jev vs LLM)
+          </button>
         </nav>
       </aside>
 
@@ -524,6 +640,7 @@ function App() {
               {activeTab === 'dashboard' && 'Benchmark Dashboard'}
               {activeTab === 'llm' && 'LLM Only — tool decision'}
               {activeTab === 'browser' && 'Jev + LLM — live browser agent'}
+              {activeTab === 'compare' && 'Benchmark — Jev + LLM vs LLM only'}
             </h2>
           </div>
           <div className={`status ${statusClass}`}>{status}</div>
@@ -1047,6 +1164,186 @@ OpenAI LLM only when required</pre>
                   </p>
                   <p className="muted">{browserResult.browser.final_url}</p>
                   <pre>{browserResult.browser.snippet || '(no text captured)'}</pre>
+                </div>
+              </>
+            )}
+          </section>
+        )}
+
+        {activeTab === 'compare' && (
+          <section className="agent-view">
+            <div className="panel">
+              <h3>
+                Benchmark: Jev + LLM vs LLM only{' '}
+                {appStatus && (
+                  <span className={`badge ${appStatus.jev === 'live' ? 'badge-live' : 'badge-sim'}`}>Jev: {appStatus.jev}</span>
+                )}
+                {appStatus && (
+                  <span className={`badge ${appStatus.llm === 'live' ? 'badge-live' : 'badge-sim'}`}>LLM: {appStatus.llm}</span>
+                )}
+              </h3>
+              <p className="muted">
+                Both pipelines run the <strong>same task</strong> with the <strong>same web search</strong> and the
+                <strong> same answer step</strong> — only the <strong>decision layer</strong> differs (Jev System One
+                vs the LLM classifying the tool). So every difference in the stats below is attributable to that layer.
+              </p>
+              <textarea
+                value={compareQuery}
+                onChange={(e) => setCompareQuery(e.target.value)}
+                placeholder="Enter a task to research on the web…"
+              />
+              <div className="button-row">
+                <button onClick={runCompare} disabled={compareLoading}>
+                  {compareLoading ? 'Running both…' : 'Run benchmark'}
+                </button>
+              </div>
+              {compareError && <p className="error-text">{compareError}</p>}
+            </div>
+
+            {(jevSteps.length > 0 || llmSteps.length > 0) && (
+              <div className="compare-grid">
+                <div className="panel">
+                  <h3>
+                    Jev + LLM{' '}
+                    <span className="muted">
+                      {jevSteps.filter((s) => s.status === 'done').length}/{jevSteps[0]?.total ?? 3}
+                    </span>
+                  </h3>
+                  <div className="wf-progress">
+                    <div
+                      className="wf-progress-fill"
+                      style={{ width: `${(jevSteps.filter((s) => s.status === 'done').length / (jevSteps[0]?.total ?? 3)) * 100}%` }}
+                    />
+                  </div>
+                  <WorkflowSteps steps={jevSteps} nowTick={nowTick} />
+                </div>
+                <div className="panel">
+                  <h3>
+                    LLM only{' '}
+                    <span className="muted">
+                      {llmSteps.filter((s) => s.status === 'done').length}/{llmSteps[0]?.total ?? 3}
+                    </span>
+                  </h3>
+                  <div className="wf-progress">
+                    <div
+                      className="wf-progress-fill wf-fill-amber"
+                      style={{ width: `${(llmSteps.filter((s) => s.status === 'done').length / (llmSteps[0]?.total ?? 3)) * 100}%` }}
+                    />
+                  </div>
+                  <WorkflowSteps steps={llmSteps} nowTick={nowTick} />
+                </div>
+              </div>
+            )}
+
+            {comparison && (
+              <>
+                <div className="panel">
+                  <h3>Verdict</h3>
+                  <p>
+                    Tool choice:{' '}
+                    <strong>{comparison.same_tool ? 'agreed' : 'differed'}</strong> (Jev: {comparison.jev_tool}, LLM:{' '}
+                    {comparison.llm_tool}). Jev's decision was{' '}
+                    <strong>{comparison.decision_latency_savings_pct.toFixed(0)}% faster</strong> and{' '}
+                    <strong>{comparison.decision_cost_savings_pct.toFixed(0)}% cheaper</strong>. End-to-end, Jev + LLM cost{' '}
+                    <strong>{comparison.total_cost_savings_pct.toFixed(0)}% less</strong> and finished{' '}
+                    <strong>{comparison.total_time_savings_pct.toFixed(0)}% faster</strong>.
+                  </p>
+                </div>
+
+                <div className="panel">
+                  <h3>Stats</h3>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Metric</th>
+                          <th>Jev + LLM</th>
+                          <th>LLM only</th>
+                          <th>Jev advantage</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td>Decision latency</td>
+                          <td>{comparison.decision_latency_ms.jev.toFixed(0)} ms</td>
+                          <td>{comparison.decision_latency_ms.llm.toFixed(0)} ms</td>
+                          <td>{comparison.decision_latency_savings_pct.toFixed(0)}% faster</td>
+                        </tr>
+                        <tr>
+                          <td>Decision cost</td>
+                          <td>{currency(comparison.decision_cost.jev)}</td>
+                          <td>{currency(comparison.decision_cost.llm)}</td>
+                          <td>{comparison.decision_cost_savings_pct.toFixed(0)}% cheaper</td>
+                        </tr>
+                        <tr>
+                          <td>Decision tokens</td>
+                          <td>{comparison.decision_tokens.jev}</td>
+                          <td>{comparison.decision_tokens.llm}</td>
+                          <td>—</td>
+                        </tr>
+                        <tr>
+                          <td>Total time</td>
+                          <td>{comparison.total_time_ms.jev.toFixed(0)} ms</td>
+                          <td>{comparison.total_time_ms.llm.toFixed(0)} ms</td>
+                          <td>{comparison.total_time_savings_pct.toFixed(0)}% faster</td>
+                        </tr>
+                        <tr>
+                          <td>Total cost</td>
+                          <td>{currency(comparison.total_cost.jev)}</td>
+                          <td>{currency(comparison.total_cost.llm)}</td>
+                          <td>{comparison.total_cost_savings_pct.toFixed(0)}% cheaper</td>
+                        </tr>
+                        <tr>
+                          <td>Total tokens</td>
+                          <td>{comparison.total_tokens.jev}</td>
+                          <td>{comparison.total_tokens.llm}</td>
+                          <td>—</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="charts-grid">
+                  <div className="panel">
+                    <h3>Decision latency (ms)</h3>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <BarChart data={[{ name: 'Decision', jev: comparison.decision_latency_ms.jev, llm: comparison.decision_latency_ms.llm }]}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="name" />
+                        <YAxis />
+                        <Tooltip />
+                        <Legend />
+                        <Bar dataKey="jev" fill="#25c2a0" name="Jev+LLM" />
+                        <Bar dataKey="llm" fill="#f59e0b" name="LLM only" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="panel">
+                    <h3>Decision cost (USD)</h3>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <BarChart data={[{ name: 'Decision', jev: comparison.decision_cost.jev, llm: comparison.decision_cost.llm }]}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="name" />
+                        <YAxis tickFormatter={(v) => `$${Number(v).toExponential(1)}`} width={90} />
+                        <Tooltip formatter={(v) => currency(Number(v))} />
+                        <Legend />
+                        <Bar dataKey="jev" fill="#25c2a0" name="Jev+LLM" />
+                        <Bar dataKey="llm" fill="#f59e0b" name="LLM only" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div className="compare-grid">
+                  <div className="panel">
+                    <h3>Jev + LLM answer</h3>
+                    <p>{jevResult?.answer}</p>
+                  </div>
+                  <div className="panel">
+                    <h3>LLM only answer</h3>
+                    <p>{cmpLlmResult?.answer}</p>
+                  </div>
                 </div>
               </>
             )}

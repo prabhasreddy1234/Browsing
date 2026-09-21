@@ -23,7 +23,7 @@ def build_local_fallback_decision(query: str, provider: str) -> Tuple[DecisionRe
     decision = DecisionResponse(tool=tool, confidence=0.88, reason=reason)
     input_tokens = max(120, min(1800, len(query) * 4))
     output_tokens = 60
-    estimated_cost = estimate_cost(input_tokens, output_tokens, "mock", provider, {provider: {"mock": {"input": 0.00012, "output": 0.0004}}})
+    estimated_cost = estimate_cost(input_tokens, output_tokens, "mock", provider, DEFAULT_PRICING)
     metric = {
         "provider": provider,
         "model": "mock-local",
@@ -161,7 +161,7 @@ async def summarize_page(query: str, page_text: str, model_name: str = None, tem
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "latency_ms": 40.0,
-            "estimated_cost": estimate_cost(input_tokens, output_tokens, "mock", "openai", {"openai": {"mock": {"input": 0.00015, "output": 0.0006}}}),
+            "estimated_cost": estimate_cost(input_tokens, output_tokens, "mock", "openai", DEFAULT_PRICING),
             "simulated": True,
         }
 

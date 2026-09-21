@@ -149,6 +149,7 @@ The frontend has three working tabs (switch via the sidebar):
 - **Dashboard** — the full benchmark dashboard (Jev vs LLM across the dataset).
 - **LLM Only** — enter a query; the LLM alone picks a tool (the traditional baseline, no Jev, no browser). Logs time and cost.
 - **Jev + LLM (Browser)** — enter a query (or a URL). **Jev decides** the tool (a typed System One choice with confidence + probabilities), **your code opens** a real headless Chromium browser, and **the LLM writes** an answer grounded in the page. A **live workflow** streams each stage as it happens: which path was chosen, a running elapsed timer, per-step latency, tokens consumed, and cost — with cumulative totals. When it finishes it also shows the Jev decision (with a live/simulated badge), the probability bars, the LLM answer, a per-step breakdown, and the captured page.
+- **Compare (Jev vs LLM)** — enter a task; **both** pipelines run concurrently and stream side by side in real time: *Jev + LLM* (Jev decides the tool) vs *LLM only* (the LLM decides the tool). The web-search and answer stages are identical in both, so every difference in the stats is attributable to the decision layer. When both finish you get a **benchmark comparison**: agreement on the tool, decision latency / cost / tokens, total time / cost / tokens, percentage advantages, bar charts, and both answers.
 
 ## API endpoints
 
@@ -156,6 +157,7 @@ The frontend has three working tabs (switch via the sidebar):
 - `POST /api/agent/llm-only` — LLM-only tool decision with time and cost.
 - `POST /api/agent/browser` — Jev decides → browser opens → LLM answers; returns the Jev decision, steps, total time, and total cost.
 - `POST /api/agent/browser/stream` — the same flow as a live Server-Sent Events stream (`step_start` / `step_end` / `done`), each event carrying per-step latency, tokens, cost, and cumulative totals.
+- `POST /api/agent/compare/stream` — runs Jev+LLM and LLM-only concurrently; streams both pipelines' events (each tagged with `approach`), then a final `comparison` event with side-by-side benchmark stats.
 - `POST /api/decision/jev`
 - `POST /api/decision/openai`
 - `POST /api/benchmark/run`

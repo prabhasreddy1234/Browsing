@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.config import JEV_MODEL, OPENAI_MODEL
 from app.data.benchmark_queries import BENCHMARK_QUERIES
 from app.db import init_db, list_runs, save_run
-from app.services.browser_agent import run_browser_agent, stream_browser_agent
+from app.services.browser_agent import run_browser_agent, stream_browser_agent, stream_compare
 from app.services.pricing import DEFAULT_PRICING, estimate_cost
 from app.services.providers import ProviderError, call_jev_decision, call_openai_decision
 from app.tool_registry import TOOL_NAMES
@@ -159,6 +159,31 @@ async def agent_browser_stream(payload: BrowserAgentRequest) -> StreamingRespons
     async def event_source():
         try:
             async for event in stream_browser_agent(
+                payload.query,
+                jev_model=payload.jev_model,
+                openai_model=payload.openai_model,
+                temperature=payload.temperature,
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:  # pragma: no cover
+            yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/agent/compare/stream")
+async def agent_compare_stream(payload: BrowserAgentRequest) -> StreamingResponse:
+    """Run Jev+LLM and LLM-only side by side, streaming both live, then compare."""
+    if not payload.query.strip():
+        raise HTTPException(status_code=400, detail="Query must not be empty.")
+
+    async def event_source():
+        try:
+            async for event in stream_compare(
                 payload.query,
                 jev_model=payload.jev_model,
                 openai_model=payload.openai_model,

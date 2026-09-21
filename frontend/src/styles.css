@@ -398,3 +398,14 @@ pre {
   color: #94a3b8;
   font-variant-numeric: tabular-nums;
 }
+
+/* Compare tab: two side-by-side columns */
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.wf-fill-amber { background: #f59e0b; }
+@media (max-width: 900px) {
+  .compare-grid { grid-template-columns: 1fr; }
+}
