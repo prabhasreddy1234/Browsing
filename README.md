@@ -133,11 +133,20 @@ A configurable default pricing table is defined in `backend/app/services/pricing
 
 **Jev is priced differently:** because System One returns a typed decision rather than generated text, it is billed on **input tokens only** at `JEV_IN_PER_M` ($0.042 per 1M by default), with output free. See `jev_cost_usd` in `backend/app/config.py` and the Jev layer in `backend/app/services/jev_system_one.py`.
 
+## How accuracy is calculated
+
+Accuracy is graded only against the built-in labelled dataset (each query has an
+`expected_tool`). Run **"Run entire benchmark"** for accuracy numbers. Custom queries you
+add have no ground truth, so they run but are excluded from accuracy (shown as `—`) rather
+than scored against a wrong default. Accuracy therefore = correct / graded, not correct / total.
+
 ## Cost simulator
 
-The dashboard includes a simple simulator that estimates cost based on request volume, average input tokens, and average output tokens.
-
-It also includes a scenario where Jev routes requests and only a percentage of them require a main OpenAI call, clearly marked as a simulation rather than measured data.
+The dashboard includes a **live** simulator. Edit requests/month, average input tokens,
+average output tokens, and the percentage of requests that need the main LLM; it computes
+the LLM-only vs Jev-routed monthly cost and the saving in real time, using the actual pricing
+table and Jev's input-only price. Jev routes every request cheaply and only the chosen
+percentage reach the full LLM.
 
 ## Limitations of the benchmark
 
@@ -149,31 +158,50 @@ It also includes a scenario where Jev routes requests and only a percentage of t
 
 ## Tabs
 
-The frontend has three working tabs (switch via the sidebar):
+The frontend has four tabs (switch via the sidebar):
 
-- **Dashboard** — the full benchmark dashboard (Jev vs LLM across the dataset).
-- **LLM Only** — enter a query; the **LLM decides** the tool, a **visible browser window opens** and searches the web for your input, and the LLM **writes a text answer** grounded in the page. Live workflow with per-step latency, tokens and cost.
-- **Jev + LLM (Browser)** — enter a query (or a URL). **Jev decides** the tool (a typed System One choice with confidence + probabilities), **your code opens** a real headless Chromium browser, and **the LLM writes** an answer grounded in the page. A **live workflow** streams each stage as it happens: which path was chosen, a running elapsed timer, per-step latency, tokens consumed, and cost — with cumulative totals. When it finishes it also shows the Jev decision (with a live/simulated badge), the probability bars, the LLM answer, a per-step breakdown, and the captured page.
-- **Compare (Jev vs LLM)** — enter a task; **both** pipelines run concurrently and stream side by side in real time: *Jev + LLM* (Jev decides the tool) vs *LLM only* (the LLM decides the tool). The web-search and answer stages are identical in both, so every difference in the stats is attributable to the decision layer. When both finish you get a **benchmark comparison**: agreement on the tool, decision latency / cost / tokens, total time / cost / tokens, percentage advantages, bar charts, and both answers.
+- **Dashboard** — the full benchmark dashboard (Jev vs LLM across the labelled dataset): KPIs, latency / cost / accuracy charts, a request-level table, the architecture comparison, and the live cost simulator.
+- **LLM Only** — enter a task; the **LLM decides** the tool, a **visible browser window opens** and searches for your input, and the LLM **writes a text answer** grounded in the page. Live workflow with per-step latency, tokens and cost.
+- **Jev + LLM (Browser)** — enter a task (or a URL). **Jev decides** the tool (a typed System One choice with confidence + probabilities), **your code opens a visible browser**, and **the LLM writes** an answer grounded in the page. A **live workflow** streams each stage as it happens (chosen path, running timer, per-step latency, tokens, cost, cumulative totals), then shows the Jev decision (live/simulated badge), probability bars, the answer, a per-step breakdown, and the captured page.
+- **Compare (Jev vs LLM)** — enter a task; **both** pipelines run concurrently and stream side by side: *Jev + LLM* vs *LLM only*. The browser and answer stages are identical, so every difference is attributable to the decision layer. When both finish you get a **benchmark comparison**: tool agreement, decision latency / cost / tokens, total time / cost / tokens, percentage advantages, bar charts, and both answers. (Compare runs headless so it doesn't open two windows.)
+
+## Prompt examples
+
+The agent tabs understand a few prompt shapes:
+
+| Prompt | What happens |
+|---|---|
+| `open www.wikipedia.org and search for NBA` | opens Wikipedia and searches *on the site* → the NBA article |
+| `search for quantum computing in wikipedia.org` | same, on-site search |
+| `Retrieve the page https://example.com/docs` | opens that exact URL |
+| `What is the latest news about Android 16?` | a general web search (Bing) |
+
+Notes: common site typos are auto-corrected (`wikipidea.org` → `wikipedia.org`). **Google is not
+usable for automated search** — it returns a CAPTCHA ("unusual traffic") by design; use Wikipedia
+or a plain web-search prompt for demos.
 
 ## API endpoints
 
-- `GET  /api/status` — whether Jev and the LLM are live or simulated, Jev's price, and the demo budget.
-- `POST /api/agent/llm/stream` — LLM-only live workflow (LLM decides → **visible** browser → LLM answer) as an SSE stream.
-- `POST /api/agent/llm-only` — LLM-only tool decision with time and cost (non-streaming, no browser).
-- `POST /api/agent/browser` — Jev decides → browser opens → LLM answers; returns the Jev decision, steps, total time, and total cost.
-- `POST /api/agent/browser/stream` — the Jev+LLM flow as a live SSE stream (`step_start` / `step_end` / `done`), opening a **visible** browser, each event carrying per-step latency, tokens, cost, and cumulative totals.
+Agent (live, Server-Sent Events):
 
-> The **LLM Only** and **Jev + LLM (Browser)** tabs open the browser in *headed* (visible) mode so you can watch the automation — a Chromium window pops up. The **Compare** tab runs headless (both pipelines at once). Headed mode needs a desktop session; if the browser can't open, the agent falls back to an HTTP fetch (badged in the UI).
-- `POST /api/agent/compare/stream` — runs Jev+LLM and LLM-only concurrently; streams both pipelines' events (each tagged with `approach`), then a final `comparison` event with side-by-side benchmark stats.
-- `POST /api/decision/jev`
-- `POST /api/decision/openai`
-- `POST /api/benchmark/run`
-- `POST /api/benchmark/run-all`
-- `GET /api/benchmark/results`
-- `GET /api/benchmark/summary`
-- `GET /api/benchmark/cost-analysis`
-- `GET /api/benchmark/latency-analysis`
+- `GET  /api/status` — whether Jev and the LLM are live or simulated, Jev's price, and the demo budget.
+- `POST /api/agent/llm/stream` — LLM-only live workflow (LLM decides → **visible** browser → LLM answer).
+- `POST /api/agent/browser/stream` — Jev + LLM live workflow, opening a **visible** browser; events carry per-step latency, tokens, cost, and cumulative totals.
+- `POST /api/agent/compare/stream` — runs Jev+LLM and LLM-only concurrently; streams both (each event tagged with `approach`), then a final `comparison` event with side-by-side stats.
+- `POST /api/agent/llm-only` — LLM-only tool decision with time and cost (non-streaming, no browser).
+- `POST /api/agent/browser` — non-streaming Jev + LLM browser run (returns the final result only).
+
+> The **LLM Only** and **Jev + LLM (Browser)** tabs open the browser in *headed* (visible) mode so you can watch the automation. **Compare** runs headless. Headed needs a desktop session; if the browser can't open, the agent falls back to an HTTP fetch (badged in the UI). Toggle with `BROWSER_HEADED` in `.env`.
+
+Benchmark & data:
+
+- `POST /api/benchmark/run` · `POST /api/benchmark/run-all` — run a benchmark and store it.
+- `GET  /api/benchmark/results` — list stored runs.
+- `DELETE /api/benchmark/results` — wipe all stored runs (what the dashboard's "Clear history" calls).
+- `GET  /api/benchmark/summary` — aggregate accuracy / latency / cost across stored runs.
+- `GET  /api/benchmark/cost-analysis` — the pricing table.
+- `GET  /api/benchmark/latency-analysis` — per-run latency series.
+- `POST /api/decision/jev` · `POST /api/decision/openai` — a single tool decision.
 
 ## Notes
 
