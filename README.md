@@ -14,12 +14,15 @@ When no `TYPESAFE_API_KEY` is set, the Jev layer runs in clearly-badged **simula
 
 ## Features
 
-- React + TypeScript frontend with dashboard, charts, and two interactive agent tabs
-- FastAPI backend with SQLite persistence
+- React + TypeScript frontend with a dashboard, charts, and three live agent tabs
+- FastAPI backend with SQLite persistence and Server-Sent Events streaming
 - Faithful Jev System One decision layer (typed choice, confidence, probabilities, input-only cost)
-- A real headless-Chromium browser agent driven by Jev's decision
-- Stores benchmark runs locally for later inspection
-- Includes a cost simulator and architecture comparison section
+- A **real, visible** Chromium browser agent driven by the decision layer — it can open a
+  site and search *on it* (e.g. "search for NBA in wikipedia.org")
+- Live per-step workflow (which path, latency, tokens, cost) streamed as it happens
+- A **side-by-side benchmark** of Jev+LLM vs LLM-only running concurrently
+- A live cost simulator and an architecture comparison section
+- Typo-correction for common site names and graceful fallback when a browser can't open
 
 ## Project structure
 
@@ -68,9 +71,11 @@ OPENAI_MODEL=gpt-4o-mini
 # optional overrides
 JEV_IN_PER_M=0.042
 DEMO_BUDGET_USD=0.5
+# open the browser visibly on the LLM-Only and Jev+LLM tabs (set 0 to run headless)
+BROWSER_HEADED=1
 ```
 
-Everything runs without keys: Jev falls back to a simulated System One heuristic and the LLM to a simulated summary, each badged in the UI. Do not commit `.env`.
+Everything runs without keys: Jev falls back to a simulated System One heuristic and the LLM to a simulated summary, each badged in the UI. **Put real keys only in `.env` (git-ignored), never in `.env.example`.**
 
 ## Run locally
 
