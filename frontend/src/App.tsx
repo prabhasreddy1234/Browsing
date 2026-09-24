@@ -26,6 +26,17 @@ type DashboardSummary = {
   estimated_cost_savings_percent: number;
 };
 
+type ActivityStats = {
+  runs: number;
+  total_time_ms: number;
+  average_time_ms: number;
+  total_cost: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  average_decision_latency_ms: number;
+  last_query: string | null;
+};
+
 type ResultRow = {
   run_id: string;
   query: string;
@@ -95,6 +106,12 @@ const EMPTY_SUMMARY: DashboardSummary = {
   total_jev_cost: 0,
   total_openai_cost: 0,
   estimated_cost_savings_percent: 0,
+};
+
+const EMPTY_ACTIVITY: ActivityStats = {
+  runs: 0, total_time_ms: 0, average_time_ms: 0, total_cost: 0,
+  total_input_tokens: 0, total_output_tokens: 0,
+  average_decision_latency_ms: 0, last_query: null,
 };
 
 type TabKey = 'dashboard' | 'llm' | 'browser' | 'compare';
@@ -301,6 +318,9 @@ function App() {
   const [comparison, setComparison] = useState<Comparison | null>(null);
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [activityStats, setActivityStats] = useState<Record<string, ActivityStats>>({
+    'LLM only': EMPTY_ACTIVITY, 'Jev + LLM': EMPTY_ACTIVITY,
+  });
   const [results, setResults] = useState<ResultRow[]>([]);
   const [runs, setRuns] = useState<BenchmarkRun[]>([]);
   const [queries, setQueries] = useState<string[]>([]);
@@ -385,12 +405,26 @@ function App() {
     }
   };
 
+  const fetchActivityStats = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/activity/stats`);
+      const data = await response.json();
+      setActivityStats({
+        'LLM only': { ...EMPTY_ACTIVITY, ...(data.stats?.['LLM only'] || {}) },
+        'Jev + LLM': { ...EMPTY_ACTIVITY, ...(data.stats?.['Jev + LLM'] || {}) },
+      });
+    } catch {
+      setActivityStats({ 'LLM only': EMPTY_ACTIVITY, 'Jev + LLM': EMPTY_ACTIVITY });
+    }
+  };
+
   const refreshData = async () => {
     await fetchStatus();
     await fetchPricing();
     await fetchSummary();
     await fetchResults();
     await fetchQueries();
+    await fetchActivityStats();
   };
 
   useEffect(() => {
@@ -472,6 +506,7 @@ function App() {
           run_jev: runConfig.runJev,
         }),
       });
+      await fetchActivityStats();
       const data = await response.json();
       setJsonPayload(JSON.stringify(data, null, 2));
       setStatus(response.ok ? 'Completed' : 'Failed');
@@ -549,6 +584,7 @@ function App() {
         if (ev.type === 'done') setLlmResult(ev.result as BrowserResult);
         else if (ev.type === 'error') setLlmError(String(ev.error));
       });
+      await fetchActivityStats();
     } catch (error) {
       setLlmError(String(error instanceof Error ? error.message : error));
     } finally {
@@ -635,6 +671,7 @@ function App() {
         if (ev.type === 'done') setBrowserResult(ev.result as BrowserResult);
         else if (ev.type === 'error') setBrowserError(String(ev.error));
       });
+      await fetchActivityStats();
     } catch (error) {
       setBrowserError(String(error instanceof Error ? error.message : error));
     } finally {
@@ -774,6 +811,38 @@ function App() {
           <div className="card">
             <span>Estimated Savings</span>
             <strong>{`${Number(summary?.estimated_cost_savings_percent ?? 0).toFixed(2)}%`}</strong>
+          </div>
+        </section>
+
+        <section className="activity-section">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Your agent activity</p>
+              <h3>LLM only vs Jev + LLM</h3>
+            </div>
+            <p className="chart-caption">Completed live agent runs, saved across refreshes</p>
+          </div>
+          <div className="activity-grid">
+            {(['LLM only', 'Jev + LLM'] as const).map((mode) => {
+              const stats = activityStats[mode];
+              return (
+                <div className={`activity-card ${mode === 'Jev + LLM' ? 'jev-activity' : 'llm-activity'}`} key={mode}>
+                  <div className="activity-card-header">
+                    <span className="activity-marker" />
+                    <h3>{mode}</h3>
+                    <strong>{stats.runs} runs</strong>
+                  </div>
+                  <div className="activity-metrics">
+                    <div><span>Avg total time</span><strong>{stats.average_time_ms.toFixed(0)} ms</strong></div>
+                    <div><span>Total cost</span><strong>{currency(stats.total_cost)}</strong></div>
+                    <div><span>Input tokens</span><strong>{stats.total_input_tokens.toLocaleString()}</strong></div>
+                    <div><span>Output tokens</span><strong>{stats.total_output_tokens.toLocaleString()}</strong></div>
+                    <div><span>Avg decision time</span><strong>{stats.average_decision_latency_ms.toFixed(0)} ms</strong></div>
+                  </div>
+                  <p className="activity-query">{stats.last_query ? `Last: ${stats.last_query}` : 'No completed runs yet.'}</p>
+                </div>
+              );
+            })}
           </div>
         </section>
 

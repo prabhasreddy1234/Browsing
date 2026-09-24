@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.config import JEV_MODEL, OPENAI_MODEL
 from app.data.benchmark_queries import BENCHMARK_QUERIES
-from app.db import clear_runs, init_db, list_runs, save_run
+from app.db import clear_agent_activity, clear_runs, init_db, list_agent_activity, list_runs, save_agent_activity, save_run
 from app.services.browser_agent import run_browser_agent, stream_compare, stream_pipeline
 from app.services.pricing import DEFAULT_PRICING, estimate_cost
 from app.services.providers import ProviderError, call_jev_decision, call_openai_decision
@@ -154,6 +154,8 @@ def _sse(agen) -> StreamingResponse:
     async def event_source():
         try:
             async for event in agen:
+                if event.get("type") == "done":
+                    _record_agent_activity(event["result"])
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:  # pragma: no cover
             yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
@@ -163,6 +165,21 @@ def _sse(agen) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
+
+
+def _record_agent_activity(result: dict[str, Any]) -> None:
+    save_agent_activity({
+        "id": str(uuid.uuid4()),
+        "mode": "LLM only" if result.get("approach") == "llm" else "Jev + LLM",
+        "query": result.get("query", ""),
+        "selected_tool": result.get("selected_tool"),
+        "total_time_ms": result.get("total_time_ms", 0),
+        "total_cost": result.get("total_cost", 0),
+        "total_input_tokens": result.get("total_input_tokens", 0),
+        "total_output_tokens": result.get("total_output_tokens", 0),
+        "decision_latency_ms": result.get("decision_latency_ms", 0),
+        "decision_cost": result.get("decision_cost", 0),
+    })
 
 
 @app.post("/api/agent/browser/stream")
@@ -207,6 +224,8 @@ async def agent_compare_stream(payload: BrowserAgentRequest) -> StreamingRespons
                 openai_model=payload.openai_model,
                 temperature=payload.temperature,
             ):
+                if event.get("type") == "done":
+                    _record_agent_activity(event["result"])
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:  # pragma: no cover
             yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
@@ -306,7 +325,28 @@ async def get_results() -> dict[str, Any]:
 @app.delete("/api/benchmark/results")
 async def delete_results() -> dict[str, Any]:
     """Wipe all stored benchmark runs (useful after changing pricing/models)."""
-    return {"cleared": clear_runs()}
+    return {"cleared": clear_runs(), "activity_cleared": clear_agent_activity()}
+
+
+@app.get("/api/activity/stats")
+async def activity_stats() -> dict[str, Any]:
+    rows = list_agent_activity()
+    stats: dict[str, dict[str, Any]] = {}
+    for mode in ("LLM only", "Jev + LLM"):
+        mode_rows = [row for row in rows if row["mode"] == mode]
+        count = len(mode_rows)
+        total_time = sum(float(row["total_time_ms"] or 0) for row in mode_rows)
+        stats[mode] = {
+            "runs": count,
+            "total_time_ms": total_time,
+            "average_time_ms": total_time / count if count else 0,
+            "total_cost": sum(float(row["total_cost"] or 0) for row in mode_rows),
+            "total_input_tokens": sum(int(row["total_input_tokens"] or 0) for row in mode_rows),
+            "total_output_tokens": sum(int(row["total_output_tokens"] or 0) for row in mode_rows),
+            "average_decision_latency_ms": sum(float(row["decision_latency_ms"] or 0) for row in mode_rows) / count if count else 0,
+            "last_query": mode_rows[0]["query"] if mode_rows else None,
+        }
+    return {"stats": stats}
 
 
 @app.get("/api/benchmark/summary")

@@ -28,6 +28,23 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_activity (
+            id TEXT PRIMARY KEY,
+            mode TEXT NOT NULL,
+            query TEXT NOT NULL,
+            selected_tool TEXT,
+            total_time_ms REAL DEFAULT 0,
+            total_cost REAL DEFAULT 0,
+            total_input_tokens INTEGER DEFAULT 0,
+            total_output_tokens INTEGER DEFAULT 0,
+            decision_latency_ms REAL DEFAULT 0,
+            decision_cost REAL DEFAULT 0,
+            created_at TEXT
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -69,6 +86,44 @@ def clear_runs() -> int:
     """Delete all stored benchmark runs. Returns how many were removed."""
     conn = get_connection()
     cursor = conn.execute("DELETE FROM benchmark_runs")
+    conn.commit()
+    removed = cursor.rowcount
+    conn.close()
+    return removed
+
+
+def save_agent_activity(activity: dict) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT INTO agent_activity (
+            id, mode, query, selected_tool, total_time_ms, total_cost,
+            total_input_tokens, total_output_tokens, decision_latency_ms,
+            decision_cost, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (
+            activity["id"], activity["mode"], activity["query"],
+            activity.get("selected_tool"), activity.get("total_time_ms", 0),
+            activity.get("total_cost", 0), activity.get("total_input_tokens", 0),
+            activity.get("total_output_tokens", 0), activity.get("decision_latency_ms", 0),
+            activity.get("decision_cost", 0),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_agent_activity() -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM agent_activity ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def clear_agent_activity() -> int:
+    conn = get_connection()
+    cursor = conn.execute("DELETE FROM agent_activity")
     conn.commit()
     removed = cursor.rowcount
     conn.close()
