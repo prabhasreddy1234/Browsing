@@ -89,6 +89,26 @@ def _parse_intent(query: str, tool: str) -> dict[str, Any]:
     return {"mode": "web_search", "url": f"https://www.bing.com/search?q={quote_plus(query)}", "search_term": None}
 
 
+def _extract_tasks(query: str) -> list[str]:
+    """Split a prompt containing multiple explicit site actions into ordered tasks."""
+    matches = list(DOMAIN_RE.finditer(query))
+    if len(matches) < 2:
+        return [query.strip()]
+
+    tasks: list[str] = []
+    for index, match in enumerate(matches):
+        start = query.rfind("open", 0, match.start())
+        if start < 0:
+            start = query.rfind("and", 0, match.start()) + 3
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(query)
+        task = query[start:end].strip(" ,;\n")
+        task = re.sub(r"\s+and\s+later\s+open\s*$", "", task, flags=re.I)
+        task = re.sub(r"^(?:and\s+later\s+|then\s+|and\s+)+", "", task, flags=re.I)
+        if task:
+            tasks.append(task)
+    return tasks or [query.strip()]
+
+
 # Buttons that dismiss a cookie / consent dialog which would otherwise block typing.
 _CONSENT_SELECTORS = [
     "button#L2AGLb",                       # Google "Accept all"
@@ -423,6 +443,58 @@ async def stream_pipeline(
         "openai_model": summary_metric.get("model"),
     }
     yield tag({"type": "done", "result": result})
+
+
+async def stream_multi_pipeline(
+    query: str,
+    approach: str = "jev",
+    jev_model: Optional[str] = None,
+    openai_model: Optional[str] = None,
+    temperature: float = 0.2,
+    headed: bool = False,
+) -> AsyncIterator[dict[str, Any]]:
+    """Run explicit multi-site instructions in order through the normal pipeline."""
+    tasks = _extract_tasks(query)
+    if len(tasks) == 1:
+        async for event in stream_pipeline(query, approach, jev_model, openai_model, temperature, headed):
+            yield event
+        return
+
+    results: list[dict[str, Any]] = []
+    steps_per_task = TOTAL_STEPS
+    for task_index, task in enumerate(tasks):
+        async for event in stream_pipeline(task, approach, jev_model, openai_model, temperature, headed):
+            if event.get("type") == "done":
+                results.append(event["result"])
+                continue
+            if event.get("type") in {"step_start", "step_end"}:
+                event = {
+                    **event,
+                    "index": task_index * steps_per_task + event["index"],
+                    "total": len(tasks) * steps_per_task,
+                    "label": f"Task {task_index + 1}: {event['label']}",
+                    "task_index": task_index + 1,
+                }
+            yield event
+
+    if not results:
+        return
+    first = results[0]
+    aggregate = {
+        **first,
+        "query": query,
+        "multi": True,
+        "tasks": results,
+        "answer": "\n\n".join(
+            f"Task {index + 1}: {result['answer']}" for index, result in enumerate(results)
+        ),
+        "total_time_ms": sum(float(result["total_time_ms"]) for result in results),
+        "total_cost": sum(float(result["total_cost"]) for result in results),
+        "total_input_tokens": sum(int(result["total_input_tokens"]) for result in results),
+        "total_output_tokens": sum(int(result["total_output_tokens"]) for result in results),
+        "steps": [step for result in results for step in result["steps"]],
+    }
+    yield {"type": "done", "approach": approach, "result": aggregate}
 
 
 # Backward-compatible alias: the single "Jev + LLM (Browser)" tab uses this.

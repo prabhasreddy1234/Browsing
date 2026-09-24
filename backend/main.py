@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.config import JEV_MODEL, OPENAI_MODEL
 from app.data.benchmark_queries import BENCHMARK_QUERIES
 from app.db import clear_agent_activity, clear_runs, init_db, list_agent_activity, list_runs, save_agent_activity, save_run
-from app.services.browser_agent import run_browser_agent, stream_compare, stream_pipeline
+from app.services.browser_agent import _extract_tasks, run_browser_agent, stream_compare, stream_multi_pipeline, stream_pipeline
 from app.services.pricing import DEFAULT_PRICING, estimate_cost
 from app.services.providers import ProviderError, call_jev_decision, call_openai_decision
 from app.tool_registry import TOOL_NAMES
@@ -189,10 +189,11 @@ async def agent_browser_stream(payload: BrowserAgentRequest) -> StreamingRespons
 
     if not payload.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty.")
-    return _sse(stream_pipeline(
-        payload.query, "jev",
-        jev_model=payload.jev_model, openai_model=payload.openai_model,
-        temperature=payload.temperature, headed=BROWSER_HEADED,
+    workflow = stream_multi_pipeline if len(_extract_tasks(payload.query)) > 1 else stream_pipeline
+    return _sse(workflow(
+        payload.query, "jev", jev_model=payload.jev_model,
+        openai_model=payload.openai_model, temperature=payload.temperature,
+        headed=BROWSER_HEADED,
     ))
 
 
@@ -203,10 +204,11 @@ async def agent_llm_stream(payload: BrowserAgentRequest) -> StreamingResponse:
 
     if not payload.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty.")
-    return _sse(stream_pipeline(
-        payload.query, "llm",
-        jev_model=payload.jev_model, openai_model=payload.openai_model,
-        temperature=payload.temperature, headed=BROWSER_HEADED,
+    workflow = stream_multi_pipeline if len(_extract_tasks(payload.query)) > 1 else stream_pipeline
+    return _sse(workflow(
+        payload.query, "llm", jev_model=payload.jev_model,
+        openai_model=payload.openai_model, temperature=payload.temperature,
+        headed=BROWSER_HEADED,
     ))
 
 
