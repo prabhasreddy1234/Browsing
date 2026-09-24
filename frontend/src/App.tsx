@@ -650,38 +650,59 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <h1>Jev Decision Benchmark</h1>
+        <div className="brand-lockup">
+          <div className="brand-mark" aria-hidden="true">J</div>
+          <div>
+            <p className="brand-kicker">System One</p>
+            <h1>Decision<br />Benchmark</h1>
+          </div>
+        </div>
+        <p className="sidebar-caption">Measure the cost of letting models choose the path.</p>
+        <div className="nav-label">Workspace</div>
         <nav>
           <button
             className={`nav-link ${activeTab === 'dashboard' ? 'active' : ''}`}
             onClick={() => setActiveTab('dashboard')}
+            aria-current={activeTab === 'dashboard' ? 'page' : undefined}
           >
-            Dashboard
+            <span className="nav-icon">01</span>
+            <span>Dashboard</span>
           </button>
           <button
             className={`nav-link ${activeTab === 'llm' ? 'active' : ''}`}
             onClick={() => setActiveTab('llm')}
+            aria-current={activeTab === 'llm' ? 'page' : undefined}
           >
-            LLM Only
+            <span className="nav-icon">02</span>
+            <span>LLM Only</span>
           </button>
           <button
             className={`nav-link ${activeTab === 'browser' ? 'active' : ''}`}
             onClick={() => setActiveTab('browser')}
+            aria-current={activeTab === 'browser' ? 'page' : undefined}
           >
-            Jev + LLM (Browser)
+            <span className="nav-icon">03</span>
+            <span>Jev + LLM <small>Browser</small></span>
           </button>
           <button
             className={`nav-link ${activeTab === 'compare' ? 'active' : ''}`}
             onClick={() => setActiveTab('compare')}
+            aria-current={activeTab === 'compare' ? 'page' : undefined}
           >
-            Compare (Jev vs LLM)
+            <span className="nav-icon">04</span>
+            <span>Compare <small>Jev vs LLM</small></span>
           </button>
         </nav>
+        <div className="sidebar-footer">
+          <span className={`connection-dot ${appStatus ? 'online' : ''}`} />
+          <span>{appStatus ? 'API connected' : 'Waiting for API'}</span>
+        </div>
       </aside>
 
       <main className="content">
         <header className="topbar">
           <div>
+            <p className="eyebrow">Observability / {activeTab}</p>
             <h2>
               {activeTab === 'dashboard' && 'Benchmark Dashboard'}
               {activeTab === 'llm' && 'LLM Only — live browser agent'}
@@ -689,7 +710,10 @@ function App() {
               {activeTab === 'compare' && 'Benchmark — Jev + LLM vs LLM only'}
             </h2>
           </div>
-          <div className={`status ${statusClass}`}>{status}</div>
+          <div className="topbar-meta">
+            <span className="data-freshness">Live workspace</span>
+            <div className={`status ${statusClass}`}><span className="status-dot" />{status}</div>
+          </div>
         </header>
 
         {activeTab === 'dashboard' && (
