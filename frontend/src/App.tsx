@@ -37,6 +37,18 @@ type ActivityStats = {
   last_query: string | null;
 };
 
+type AgentRunHistory = {
+  id: string;
+  mode: string;
+  query: string;
+  selected_tool?: string;
+  total_time_ms: number;
+  total_cost: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  created_at: string;
+};
+
 type ResultRow = {
   run_id: string;
   query: string;
@@ -321,6 +333,7 @@ function App() {
   const [activityStats, setActivityStats] = useState<Record<string, ActivityStats>>({
     'LLM only': EMPTY_ACTIVITY, 'Jev + LLM': EMPTY_ACTIVITY,
   });
+  const [agentHistory, setAgentHistory] = useState<AgentRunHistory[]>([]);
   const [results, setResults] = useState<ResultRow[]>([]);
   const [runs, setRuns] = useState<BenchmarkRun[]>([]);
   const [queries, setQueries] = useState<string[]>([]);
@@ -418,6 +431,16 @@ function App() {
     }
   };
 
+  const fetchAgentHistory = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/activity/history`);
+      const data = await response.json();
+      setAgentHistory(data.runs || []);
+    } catch {
+      setAgentHistory([]);
+    }
+  };
+
   const refreshData = async () => {
     await fetchStatus();
     await fetchPricing();
@@ -425,6 +448,7 @@ function App() {
     await fetchResults();
     await fetchQueries();
     await fetchActivityStats();
+    await fetchAgentHistory();
   };
 
   useEffect(() => {
@@ -554,6 +578,7 @@ function App() {
     setResults([]);
     setRuns([]);
     setSummary(EMPTY_SUMMARY);
+    setAgentHistory([]);
     setJsonPayload('');
     await refreshData();
   };
@@ -585,6 +610,7 @@ function App() {
         else if (ev.type === 'error') setLlmError(String(ev.error));
       });
       await fetchActivityStats();
+      await fetchAgentHistory();
     } catch (error) {
       setLlmError(String(error instanceof Error ? error.message : error));
     } finally {
@@ -672,6 +698,7 @@ function App() {
         else if (ev.type === 'error') setBrowserError(String(ev.error));
       });
       await fetchActivityStats();
+      await fetchAgentHistory();
     } catch (error) {
       setBrowserError(String(error instanceof Error ? error.message : error));
     } finally {
@@ -843,6 +870,46 @@ function App() {
                 </div>
               );
             })}
+          </div>
+        </section>
+
+        <section className="panel agent-history-panel">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Run history</p>
+              <h3>Completed agent runs</h3>
+            </div>
+            <p className="chart-caption">Showing the latest {Math.min(agentHistory.length, 100)} runs</p>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Mode</th>
+                  <th>Query</th>
+                  <th>Tool</th>
+                  <th>Total time</th>
+                  <th>Cost</th>
+                  <th>Tokens</th>
+                </tr>
+              </thead>
+              <tbody>
+                {agentHistory.length ? agentHistory.map((run) => (
+                  <tr key={run.id}>
+                    <td className="history-time">{new Date(`${run.created_at}Z`).toLocaleString()}</td>
+                    <td><span className={`history-mode ${run.mode === 'Jev + LLM' ? 'history-mode-jev' : 'history-mode-llm'}`}>{run.mode}</span></td>
+                    <td className="history-query">{run.query}</td>
+                    <td>{run.selected_tool || '—'}</td>
+                    <td>{Number(run.total_time_ms).toFixed(0)} ms</td>
+                    <td>{currency(run.total_cost)}</td>
+                    <td>{(Number(run.total_input_tokens) + Number(run.total_output_tokens)).toLocaleString()}</td>
+                  </tr>
+                )) : (
+                  <tr><td colSpan={7} className="history-empty">No agent runs yet.</td></tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </section>
 

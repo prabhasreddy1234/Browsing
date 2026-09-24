@@ -374,6 +374,32 @@ button, input, select, textarea {
   white-space: nowrap;
 }
 
+.agent-history-panel {
+  margin-bottom: 20px;
+}
+
+.history-time {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.history-query {
+  max-width: 360px;
+  min-width: 220px;
+}
+
+.history-mode {
+  white-space: nowrap;
+}
+
+.history-mode-jev { color: var(--teal); }
+.history-mode-llm { color: var(--amber); }
+
+.history-empty {
+  color: var(--muted);
+  text-align: center;
+}
+
 .charts-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
@@ -628,6 +654,16 @@ th {
 @media (max-width: 720px) {
   .simulator-grid {
     grid-template-columns: 1fr;
+  }
+
+  .activity-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .section-heading {
+    align-items: start;
+    flex-direction: column;
+    gap: 4px;
   }
 }
 

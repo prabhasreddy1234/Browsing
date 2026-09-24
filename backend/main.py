@@ -351,6 +351,12 @@ async def activity_stats() -> dict[str, Any]:
     return {"stats": stats}
 
 
+@app.get("/api/activity/history")
+async def activity_history() -> dict[str, Any]:
+    """Return completed live agent runs for the dashboard history table."""
+    return {"runs": list_agent_activity()[:100]}
+
+
 @app.get("/api/benchmark/summary")
 async def get_summary() -> dict[str, Any]:
     rows = list_runs()
