@@ -55,6 +55,30 @@ const API_BASE = 'http://localhost:8000';
 
 const currency = (value: number) => `$${Number(value || 0).toFixed(8)}`;
 
+const chartColors = {
+  jev: '#65d8b5',
+  openai: '#f2b35d',
+  grid: 'rgba(163, 195, 185, 0.14)',
+  axis: '#78908b',
+};
+
+const chartAxis = { fill: chartColors.axis, fontSize: 11 };
+
+function BenchmarkTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="chart-tooltip">
+      <div className="chart-tooltip-label">{label}</div>
+      {payload.map((entry: any) => (
+        <div className="chart-tooltip-row" key={entry.dataKey}>
+          <span><i style={{ background: entry.color }} />{entry.name || entry.dataKey}</span>
+          <strong>{typeof entry.value === 'number' ? entry.value.toLocaleString(undefined, { maximumFractionDigits: 6 }) : entry.value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Human-readable dollars for larger (monthly) totals.
 const usd = (value: number) =>
   `$${Number(value || 0).toLocaleString(undefined, {
@@ -754,60 +778,64 @@ function App() {
         </section>
 
         <section className="charts-grid">
-          <div className="panel">
+          <div className="panel chart-panel">
             <h3>Latency comparison</h3>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={latencyChartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" />
-                <YAxis />
-                <Tooltip />
+            <p className="chart-caption">Average and median decision time</p>
+            <ResponsiveContainer width="100%" height={238}>
+              <BarChart data={latencyChartData} margin={{ top: 12, right: 8, left: -18, bottom: 4 }}>
+                <CartesianGrid vertical={false} stroke={chartColors.grid} />
+                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={chartAxis} />
+                <YAxis axisLine={false} tickLine={false} tick={chartAxis} tickFormatter={(value) => `${value}ms`} />
+                <Tooltip content={<BenchmarkTooltip />} cursor={{ fill: 'rgba(101, 216, 181, 0.06)' }} />
                 <Legend />
-                <Bar dataKey="jev" fill="#25c2a0" name="Jev" />
-                <Bar dataKey="openai" fill="#f59e0b" name="OpenAI" />
+                <Bar dataKey="jev" fill={chartColors.jev} name="Jev" radius={[5, 5, 0, 0]} maxBarSize={42} />
+                <Bar dataKey="openai" fill={chartColors.openai} name="OpenAI" radius={[5, 5, 0, 0]} maxBarSize={42} />
               </BarChart>
             </ResponsiveContainer>
           </div>
 
-          <div className="panel">
+          <div className="panel chart-panel">
             <h3>Cost comparison</h3>
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={costChartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" />
-                <YAxis />
-                <Tooltip />
+            <p className="chart-caption">Cumulative spend by request</p>
+            <ResponsiveContainer width="100%" height={238}>
+              <LineChart data={costChartData} margin={{ top: 12, right: 8, left: -18, bottom: 4 }}>
+                <CartesianGrid vertical={false} stroke={chartColors.grid} />
+                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={chartAxis} />
+                <YAxis axisLine={false} tickLine={false} tick={chartAxis} tickFormatter={(value) => `$${Number(value).toFixed(4)}`} />
+                <Tooltip content={<BenchmarkTooltip />} />
                 <Legend />
-                <Line dataKey="jev" stroke="#25c2a0" />
-                <Line dataKey="openai" stroke="#f59e0b" />
+                <Line dataKey="jev" stroke={chartColors.jev} strokeWidth={3} dot={{ r: 3, fill: chartColors.jev, strokeWidth: 0 }} activeDot={{ r: 5 }} name="Jev" />
+                <Line dataKey="openai" stroke={chartColors.openai} strokeWidth={3} dot={{ r: 3, fill: chartColors.openai, strokeWidth: 0 }} activeDot={{ r: 5 }} name="OpenAI" />
               </LineChart>
             </ResponsiveContainer>
           </div>
 
-          <div className="panel">
+          <div className="panel chart-panel">
             <h3>Accuracy comparison</h3>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={accuracyData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" />
-                <YAxis />
-                <Tooltip />
-                <Bar dataKey="jev" fill="#25c2a0" name="Jev" />
-                <Bar dataKey="openai" fill="#f59e0b" name="OpenAI" />
+            <p className="chart-caption">Graded tool-selection results</p>
+            <ResponsiveContainer width="100%" height={238}>
+              <BarChart data={accuracyData} margin={{ top: 12, right: 8, left: -18, bottom: 4 }}>
+                <CartesianGrid vertical={false} stroke={chartColors.grid} />
+                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={chartAxis} />
+                <YAxis domain={[0, 100]} axisLine={false} tickLine={false} tick={chartAxis} tickFormatter={(value) => `${value}%`} />
+                <Tooltip content={<BenchmarkTooltip />} cursor={{ fill: 'rgba(101, 216, 181, 0.06)' }} />
+                <Bar dataKey="jev" fill={chartColors.jev} name="Jev" radius={[5, 5, 0, 0]} maxBarSize={42} />
+                <Bar dataKey="openai" fill={chartColors.openai} name="OpenAI" radius={[5, 5, 0, 0]} maxBarSize={42} />
               </BarChart>
             </ResponsiveContainer>
           </div>
 
-          <div className="panel">
+          <div className="panel chart-panel">
             <h3>Cost vs accuracy</h3>
-            <ResponsiveContainer width="100%" height={220}>
-              <ScatterChart>
-                <CartesianGrid />
-                <XAxis type="number" dataKey="x" name="Jev cost" />
-                <YAxis type="number" dataKey="y" name="OpenAI cost" />
+            <p className="chart-caption">Each point is a benchmark request</p>
+            <ResponsiveContainer width="100%" height={238}>
+              <ScatterChart margin={{ top: 12, right: 8, left: -8, bottom: 4 }}>
+                <CartesianGrid vertical={false} stroke={chartColors.grid} />
+                <XAxis type="number" dataKey="x" name="Jev cost" axisLine={false} tickLine={false} tick={chartAxis} tickFormatter={(value) => `$${Number(value).toFixed(4)}`} />
+                <YAxis type="number" dataKey="y" name="OpenAI cost" axisLine={false} tickLine={false} tick={chartAxis} tickFormatter={(value) => `$${Number(value).toFixed(4)}`} />
                 <ZAxis type="number" dataKey="z" range={[60, 400]} name="Latency" />
-                <Tooltip cursor={{ strokeDasharray: '3 3' }} />
-                <Scatter data={scatterData} fill="#8b5cf6" />
+                <Tooltip content={<BenchmarkTooltip />} cursor={{ stroke: chartColors.jev, strokeDasharray: '4 4' }} />
+                <Scatter data={scatterData} fill={chartColors.jev} fillOpacity={0.78} stroke="#d7fff1" strokeWidth={1} />
               </ScatterChart>
             </ResponsiveContainer>
           </div>
@@ -1449,31 +1477,33 @@ OpenAI LLM only when required</pre>
                 </div>
 
                 <div className="charts-grid">
-                  <div className="panel">
+                  <div className="panel chart-panel">
                     <h3>Decision latency (ms)</h3>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <BarChart data={[{ name: 'Decision', jev: comparison.decision_latency_ms.jev, llm: comparison.decision_latency_ms.llm }]}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="name" />
-                        <YAxis />
-                        <Tooltip />
+                    <p className="chart-caption">Time spent choosing the tool</p>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={[{ name: 'Decision', jev: comparison.decision_latency_ms.jev, llm: comparison.decision_latency_ms.llm }]} margin={{ top: 12, right: 8, left: -18, bottom: 4 }}>
+                        <CartesianGrid vertical={false} stroke={chartColors.grid} />
+                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={chartAxis} />
+                        <YAxis axisLine={false} tickLine={false} tick={chartAxis} tickFormatter={(value) => `${value}ms`} />
+                        <Tooltip content={<BenchmarkTooltip />} cursor={{ fill: 'rgba(101, 216, 181, 0.06)' }} />
                         <Legend />
-                        <Bar dataKey="jev" fill="#25c2a0" name="Jev+LLM" />
-                        <Bar dataKey="llm" fill="#f59e0b" name="LLM only" />
+                        <Bar dataKey="jev" fill={chartColors.jev} name="Jev+LLM" radius={[5, 5, 0, 0]} maxBarSize={42} />
+                        <Bar dataKey="llm" fill={chartColors.openai} name="LLM only" radius={[5, 5, 0, 0]} maxBarSize={42} />
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
-                  <div className="panel">
+                  <div className="panel chart-panel">
                     <h3>Decision cost (USD)</h3>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <BarChart data={[{ name: 'Decision', jev: comparison.decision_cost.jev, llm: comparison.decision_cost.llm }]}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="name" />
-                        <YAxis tickFormatter={(v) => `$${Number(v).toExponential(1)}`} width={90} />
-                        <Tooltip formatter={(v) => currency(Number(v))} />
+                    <p className="chart-caption">Cost of selecting the tool</p>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={[{ name: 'Decision', jev: comparison.decision_cost.jev, llm: comparison.decision_cost.llm }]} margin={{ top: 12, right: 8, left: -8, bottom: 4 }}>
+                        <CartesianGrid vertical={false} stroke={chartColors.grid} />
+                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={chartAxis} />
+                        <YAxis tickFormatter={(v) => `$${Number(v).toExponential(1)}`} width={74} axisLine={false} tickLine={false} tick={chartAxis} />
+                        <Tooltip content={<BenchmarkTooltip />} cursor={{ fill: 'rgba(101, 216, 181, 0.06)' }} />
                         <Legend />
-                        <Bar dataKey="jev" fill="#25c2a0" name="Jev+LLM" />
-                        <Bar dataKey="llm" fill="#f59e0b" name="LLM only" />
+                        <Bar dataKey="jev" fill={chartColors.jev} name="Jev+LLM" radius={[5, 5, 0, 0]} maxBarSize={42} />
+                        <Bar dataKey="llm" fill={chartColors.openai} name="LLM only" radius={[5, 5, 0, 0]} maxBarSize={42} />
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
